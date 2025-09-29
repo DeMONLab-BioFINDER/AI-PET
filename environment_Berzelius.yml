@@ -1,0 +1,18 @@
+name: ai-pet
+channels: [pytorch, nvidia, conda-forge]
+dependencies:
+  - python=3.10
+  - pytorch=2.4.*
+  - torchvision=0.19.*
+  - torchaudio=2.4.*
+  - pytorch-cuda=12.1        # works with CUDA 12.2 drivers
+  - pandas
+  - scikit-learn
+  - tqdm
+  - optuna
+  - matplotlib
+  - nibabel
+  - pip
+  - pip:
+      - monai>=1.3
+

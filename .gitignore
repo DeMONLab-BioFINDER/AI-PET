@@ -1,0 +1,15 @@
+# IDEs and OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Caches/logs
+*.log
+*.pyc
+__pycache__/
+
+test.ipynb
+slurm*
+*~
+jobgraph_overview*
