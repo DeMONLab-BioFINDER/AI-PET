@@ -11,21 +11,21 @@ def parse_arguments():
 
     parser.add_argument("--model", type=str, default="CNN3D",
                 help="Class name in models.py (e.g., CNN3D, UNet3D, ResNet50_3D, DenseNet121_3D...)")
-    parser.add_argument('--model_name_extra', type=str, default="2split_200sampled", help='Extra name to be used as the result folder name. E.g. parameters or others tests names')
+    parser.add_argument('--model_name_extra', type=str, default="2split_sampled200_param-norm-instance", help='Extra name to be used as the result folder name. E.g. parameters or others tests names')
     parser.add_argument("--input_path", type=str, default='', help='images save in BIDS format. If not input, will set as <proj_path>/data')
-    parser.add_argument("--data_suffix", type=str, default='_Inten_Norm', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm')
+    parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm')
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
 
     # Model args
     parser.add_argument("--model_kwargs", type=str, default="",
                     help='JSON string of extra kwargs for the selected model (e.g., \'{"features": 32}\')')
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.3)
     
     # Training
-    parser.add_argument("--epochs", type=int, default=15) # true model should start with 30 
+    parser.add_argument("--epochs", type=int, default=30) # true model should start with 30 
     parser.add_argument("--loss_w_cls", type=float, default=1.0)
     parser.add_argument("--loss_w_reg", type=float, default=1.0)
     parser.add_argument("--num_workers", type=int, default=8) # 8 on the cluster, 2 on mac
@@ -91,7 +91,7 @@ def make_output_dir(args, proj_path, script_path):
     args.script_path = script_path
     if not args.input_path: args.input_path = os.path.join(proj_path, "data") # set input path to <proj_path>/data is not stated
     # Construct output path'
-    args.output_name = "_".join([args.model, args.targets, args.model_name_extra, args.output_date_time])
+    args.output_name = "_".join([args.model, args.targets, args.model_name_extra, f'stratify-{args.stratifycvby}', args.output_date_time])
     args.output_path = os.path.join(proj_path, "results", args.output_name)
 
     # Create output directory

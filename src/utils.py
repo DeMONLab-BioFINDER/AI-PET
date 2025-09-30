@@ -116,7 +116,7 @@ def hold_out_set(df, labels, test_size: float = 0.2, seed: int = 42,) -> Tuple[n
     """
     # ensure sane K
     #k = max(2, int(round(1.0 / float(test_size))))
-    k = 2
+    k = 5
     splits = make_splits(df, labels, n_splits=k, seed=seed)
     train_idx, test_idx = splits[-1]   # pick the last fold as test to reduce accidental bias
     return np.asarray(train_idx), np.asarray(test_idx)

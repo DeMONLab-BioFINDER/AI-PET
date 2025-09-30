@@ -5,10 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from typing import Any, Tuple, Optional
-from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, mean_squared_error
+from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, mean_squared_error, roc_curve, balanced_accuracy_score, f1_score, matthews_corrcoef
 
 
-def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_reg=1.0):
+def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w_cls=1.0, loss_w_reg=1.0):
     model.train()
     mse = nn.MSELoss()
     losses = []
@@ -35,8 +35,9 @@ def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_r
             opt.step()
 
         losses.append(float(loss.detach().item()))
-        print(float(loss.detach().item()), end='\t')
-    return float(np.mean(losses)) if losses else 0.0
+    losses_dict = {i: v for i, v in enumerate(losses)}
+
+    return (float(np.mean(losses)), losses_dict) if losses else (0.0, {})
 
 
 @torch.no_grad()
@@ -81,7 +82,7 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
             cents.append(cent.cpu().numpy().ravel())
             yreg.append(y_reg.cpu().numpy().ravel())
 
-    metrics = {"val_loss": 0.0, "auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan}
+    metrics = {"auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan, "val_metric": 0.0} #"val_loss": 0.0, 
 
     if any_cls:
         ycls  = np.concatenate(ycls)
@@ -98,6 +99,8 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
                 # binary AUC: take the column for the chosen positive class
                 pos = int(labels.max())
                 metrics["auc"] = roc_auc_score((ycls == pos).astype(int), probs[:, pos])
+                metrics["acc_opt"], metrics["bacc"], metrics["f1"], metrics["mcc"], metrics["best_thr"] = opt_threshold(ycls, probs, pos)
+
             else:
                 metrics["auc"] = float(roc_auc_score(ycls, probs, multi_class="ovr", average="macro", labels=labels))
         metrics["acc"] = float(accuracy_score(ycls, preds))
@@ -110,13 +113,20 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
 
     # robust combined score proxy (only include what exists)
     parts = []
-    if any_cls and np.isfinite(metrics["auc"]): parts.append(1 - metrics["auc"])
+    if any_cls: 
+        if np.isfinite(metrics["auc"]): parts.append(metrics["auc"])
+        if np.isfinite(metrics["acc"]): parts.append(metrics["acc"])
     if any_reg:
-        if np.isfinite(metrics["mae"]):  parts.append(metrics["mae"])
-        if np.isfinite(metrics["rmse"]): parts.append(metrics["rmse"])
-        if np.isfinite(metrics["r2"]):   parts.append(1 - metrics["r2"])
+        mae_ref = np.median(np.abs(yreg - np.median(yreg)))
+        if not np.isfinite(mae_ref) or mae_ref <= 1e-6:
+            mae_ref = max(np.std(yreg), 1e-6)
+        mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan
+        r2_good  = r2 if np.isfinite(r2) else np.nan
+        parts.append(mae_good)
+        parts.append(r2_good)
 
-    metrics["val_loss"] = float(np.sum(parts)) if parts else 0.0  # never NaN
+
+    metrics["val_metric"] = float(np.sum(parts)) if parts else 0.0  # never NaN
 
     return metrics
 
@@ -138,10 +148,12 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: Optional[
 
     if (not y_cls.isnan().all()) and (loss_w_cls > 0) and (logit is not None):
         if logit.ndim == 2 and logit.shape[1] == 1:
-            bce = nn.BCEWithLogitsLoss()
-            loss_cls = bce(logit.squeeze(1), y_cls.squeeze(1).float())
+            assert set(torch.unique(y_cls).tolist()) <= {0.0, 1.0}, "BCE requires binary {0,1} targets" # BCE path: targets must be float 0/1
+            loss_cls = nn.BCEWithLogitsLoss()(logit.squeeze(1), y_cls.squeeze(1).float())
         else:
-            loss_cls = F.cross_entropy(logit, y_cls.squeeze(1).long())
+            yl = y_cls.squeeze(1).long()
+            assert yl.min() >= 0 and yl.max() < logit.shape[1], "CE: target out of range" # CE path: targets must be long in [0..C-1]
+            loss_cls = F.cross_entropy(logit, yl)
         total = total + loss_w_cls * loss_cls
         used_head = True
     if (not y_reg.isnan().all()) and (loss_w_reg > 0) and (cent is not None):
@@ -152,6 +164,27 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: Optional[
             "(logit and/or cent) and corresponding loss weights/targets are set.")
 
     return total, (logit, cent)
+
+def opt_threshold(ycls, probs, pos):
+    ybin = (ycls == pos).astype(int)             # binary ground-truth 0/1
+    prob1 = probs if probs.ndim == 1 else probs[:, pos]
+    
+    # ROC-derived best threshold (Youden's J)
+    fpr, tpr, thr = roc_curve(ybin, prob1)
+    # roc_curve returns thresholds aligned with tpr/fpr; choose max(tpr - fpr)
+    j = tpr - fpr
+    best_ix = int(np.argmax(j))
+    best_thr = float(thr[best_ix])
+
+    yhat_opt = (prob1 >= best_thr).astype(int)
+
+    acc_opt = float((yhat_opt == ybin).mean())
+    bacc    = float(balanced_accuracy_score(ybin, yhat_opt))
+    f1      = float(f1_score(ybin, yhat_opt))
+    mcc     = float(matthews_corrcoef(ybin, yhat_opt))
+    best_thr= best_thr
+
+    return acc_opt, bacc, f1, mcc, best_thr
 
 def unpack_model_outputs(out: Any, y_cls, y_reg) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """

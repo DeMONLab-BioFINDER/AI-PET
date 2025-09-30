@@ -15,7 +15,7 @@ def suggest_common(trial, base_args) -> Dict:
 # ---- MODEL-SPECIFIC SUGGESTORS ----
 def suggest_CNN3D(trial, base_args, common: Dict) -> Tuple[str, str]:
     """Return (model_name, model_kwargs_json) for CNN3D."""
-    opts = [(16,32,64), (16,32,64,128), (32,64,128,256)]
+    opts = [(16,32,64), (8, 16, 32, 64), (16,32,64,128), (32,64,128,256)]
     key = trial.suggest_categorical("cnn_widths", [json.dumps(o) for o in opts])
     widths = tuple(json.loads(key))
     norm       = trial.suggest_categorical("cnn_norm", ["batch", "instance"])

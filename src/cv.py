@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import StratifiedKFold
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.data import get_train_val_loaders
 from src.train import train_one_epoch, eval_epoch
@@ -31,7 +32,8 @@ def kfold_cv(df_clean, stratify_labels, args):
         append_metrics_row(metrics_path, row)
 
         tqdm.write(f"[{fold_name}] AUC={m.get('auc'):.3f} ACC={m.get('acc'):.3f} "
-                   f"MAE={m.get('mae'):.2f} RMSE={m.get('rmse'):.2f} R2={m.get('r2'):.3f}")
+                   f"MAE={m.get('mae'):.2f} RMSE={m.get('rmse'):.2f} R2={m.get('r2'):.3f}"
+                   f"val_metric={m.get('val_metric'):.2f}")
 
     print(f"\nDone. Metrics saved to: {metrics_path}")
 
@@ -50,14 +52,19 @@ def run_fold(train_df, val_df, args, fold_name: str):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler() if args.amp and torch.cuda.is_available() else None
 
+    sched = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) # scheduler (maximize AUC)
+
+
     best_score = float("inf")
     csv_path = os.path.join(fold_dir, "metrics_per_epoch.csv")
+    csv_loss_path = os.path.join(fold_dir, "trainning_loss_per_epoch.csv")
 
     # epoch-level progress bar (doesn't clash with dataloader bars)
+    best_val = -float("inf")
     epoch_bar = tqdm(range(1, args.epochs + 1), desc=f"{fold_name} epochs", position=1, leave=False, dynamic_ncols=True)
     for epoch in epoch_bar:
-        tr_loss = train_one_epoch(model, dl_tr, opt, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
-        metrics = eval_epoch(model, dl_va, args.device)
+        tr_loss, tr_loss_all = train_one_epoch(model, dl_tr, opt, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
+        metrics = eval_epoch(model, dl_va, args.device, sched)
 
         # Keep the tqdm bar neat
         epoch_bar.set_postfix(
@@ -66,18 +73,23 @@ def run_fold(train_df, val_df, args, fold_name: str):
             ACC=f"{metrics.get('acc', float('nan')):.3f}",
             MAE=f"{metrics.get('mae', float('nan')):.2f}",
             RMSE=f"{metrics.get('rmse', float('nan')):.2f}",
-            R2=f"{metrics.get('r2', float('nan')):.3f}"
+            R2=f"{metrics.get('r2', float('nan')):.3f}",
+            val_metric=f"{metrics.get('val_metric', float('nan')):.3f}"
         )
 
         # checkpoint best
         if epoch == 1 and not os.path.exists(os.path.join(ckpt_dir, "best.pt")):
             save_checkpoint(model, os.path.join(ckpt_dir, "best.pt"))
-        if metrics["val_loss"] < best_score:
-            best_score = metrics["val_loss"]
+        # step scheduler
+        val_metric = metrics.get('val_metric', float('nan'))
+        if np.isfinite(val_metric): sched.step(val_metric)
+        if np.isfinite(val_metric) and val_metric > best_val:
+            best_score = val_metric
             save_checkpoint(model, os.path.join(ckpt_dir, "best.pt"))
 
         # append epoch metrics to CSV
         append_epoch_metrics_csv(csv_path, epoch, {**metrics, "train_loss": tr_loss})
+        append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
 
         # Grad-CAM snapshots on a schedule
         target_layer = find_last_conv3d(model)  # generic for CNN3D, UNet3D, etc.
@@ -90,7 +102,7 @@ def run_fold(train_df, val_df, args, fold_name: str):
     best_path = os.path.join(ckpt_dir, "best.pt")
     if os.path.exists(best_path):
         try:
-            sd = torch.load(best_path, map_location=args.device)
+            sd = torch.load(best_path, map_location=args.device, weights_only=True)
         except TypeError:
             sd = torch.load(best_path, map_location=args.device)
         state_dict = sd.get("model", sd) if isinstance(sd, dict) else sd
@@ -108,7 +120,8 @@ def run_fold(train_df, val_df, args, fold_name: str):
                f"ACC={final_metrics.get('acc', float('nan')):.3f} "
                f"MAE={final_metrics.get('mae', float('nan')):.2f} "
                f"RMSE={final_metrics.get('rmse', float('nan')):.2f} "
-               f"R2={final_metrics.get('r2', float('nan')):.3f}")
+               f"R2={final_metrics.get('r2', float('nan')):.3f} "
+               f"val_metric={final_metrics.get('val_metric', float('nan')):.3f}")
 
     return final_metrics
 

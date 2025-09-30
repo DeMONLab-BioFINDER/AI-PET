@@ -157,6 +157,57 @@ def save_gradcam_overlays(model, cam, loader, out_dir, device, max_items=8):
             count += 1
 
 
+def save_gradcam_nifti(model, cam, loader, out_dir, device, max_items=999, use_ref_affine=True):
+    """
+    Save Grad-CAM volumes as NIfTI in the model input space (post-preprocessing).
+    If `use_ref_affine` is True and a per-sample PET path is provided by the loader,
+    we will borrow the source affine (shape may differ; that's OK—it's only an orientation/pose hint).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    count = 0
+
+    for batch in loader:
+        # Support both old (x,y_cls,y_reg,ID) and new (x,y_cls,y_reg,ID,pet_path) signatures
+        if len(batch) == 4:
+            x, y_cls, y_reg, pid = batch
+            pet_path = [None] * x.shape[0]
+        else:
+            x, y_cls, y_reg, pid, pet_path = batch
+
+        if count >= max_items:
+            break
+
+        x = x.to(device, non_blocking=True)
+
+        with torch.enable_grad():
+            heat = cam(x)  # [B,1,D,H,W] normalized 0..1
+
+        # Ensure CAM is same spatial size as network input (defensive)
+        if heat.shape[2:] != x.shape[2:]:
+            heat = F.interpolate(heat, size=x.shape[2:], mode="trilinear", align_corners=False)
+
+        h_np = heat.detach().cpu().numpy()  # [B,1,D,H,W]
+        B = h_np.shape[0]
+
+        for b in range(B):
+            if count >= max_items:
+                return
+            vol = h_np[b, 0].astype(np.float32)  # [D,H,W], already 0..1
+
+            # Choose an affine:
+            affine = np.eye(4, dtype=np.float32)
+            if use_ref_affine and pet_path[b]:
+                try:
+                    affine = nib.load(pet_path[b]).affine.astype(np.float32)
+                except Exception:
+                    pass  # fall back to identity if loading fails
+
+            # Write NIfTI (.nii.gz)
+            out_path = os.path.join(out_dir, f"{pid[b]}_gradcam.nii.gz")
+            nib.save(nib.Nifti1Image(vol, affine), out_path)
+            count += 1
+
+
 def find_last_conv3d(module: nn.Module) -> Optional[nn.Module]:
     """
     Return the last nn.Conv3d found by DFS over modules.

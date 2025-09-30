@@ -24,26 +24,27 @@ class CNN3D(nn.Module):
     norm : str
         "batch" or "instance" normalization.
     """
-    def __init__(self, in_channels: int = 1, widths=(16, 32, 64, 128), pool_every: int = 1, 
+    def __init__(self, in_channels: int = 1, widths=(16, 32, 64, 128), pool_every: int = 1,
                  dropout: float = 0.2, norm: str = "batch", num_classes=1):
         super().__init__()
         assert pool_every >= 1
         assert norm in {"batch", "instance"}
-
-        Norm3d = nn.BatchNorm3d if norm == "batch" else nn.InstanceNorm3d
+        print(f'in_channels: {in_channels}, widths: {widths}, pool_every: {pool_every}, dropout: {dropout}, norm: {norm}, num_classes: {num_classes}')
+        def make_norm(c):
+            if norm == "batch":
+                return nn.BatchNorm3d(c)  # ok if batch_size >= ~8
+            else:
+                return nn.InstanceNorm3d(c, affine=True, track_running_stats=False)
 
         layers = []
         c_in = in_channels
         for i, c_out in enumerate(widths, start=1):
             layers += [
-                nn.Conv3d(c_in, c_out, kernel_size=3, stride=1, padding=1, bias=False),
-                Norm3d(c_out),
+                nn.Conv3d(c_in, c_out, 3, 1, 1, bias=False),
+                make_norm(c_out),
                 nn.ReLU(inplace=True),
-            ]
-            # Optional second conv per stage (a bit more capacity, still small)
-            layers += [
-                nn.Conv3d(c_out, c_out, kernel_size=3, stride=1, padding=1, bias=False),
-                Norm3d(c_out),
+                nn.Conv3d(c_out, c_out, 3, 1, 1, bias=False),
+                make_norm(c_out),
                 nn.ReLU(inplace=True),
             ]
             if (i % pool_every) == 0:
@@ -52,10 +53,7 @@ class CNN3D(nn.Module):
 
         self.features = nn.Sequential(*layers)
         self.gap = nn.AdaptiveAvgPool3d(1)
-        self.head = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(widths[-1], num_classes),
-        )
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(widths[-1], num_classes))
 
     def forward(self, x):
         x = self.features(x)       # [B, C, D, H, W]

@@ -24,10 +24,7 @@ def build_master_table(input_path: str, preproc_method: str, targets: List[str],
     # Detect cached mode
     use_cache = (not preproc_method) or (str(preproc_method).strip() == "")
     if use_cache:
-        df = pd.read_csv(Path(input_path) / "demo.csv", index_col=0)
-        # Add stable row index that matches the order of the saved dataloader
-        if "ID" not in df.columns:
-            df.insert(0, "ID", range(len(df)))
+        df = pd.read_csv(Path(input_path) / "demo.csv", index_col=0) # Must have 'ID' column from 0 to len(df)
         print(f"[cache] Loaded demo.csv with {len(df)} rows (no filesystem scan).")
     else:
         pets = find_pet_files(input_path=input_path, preproc_method=preproc_method, subjects_list=subjects)
@@ -120,8 +117,12 @@ def get_train_val_loaders(train_df, val_df, args):
     use_cache = (not args.data_suffix) or (str(args.data_suffix).strip() == "")
     if use_cache:
         p = Path(args.input_path) / "data.pt"
-        tfm = torch.load(p, map_location="cpu", weights_only=True) if p.exists() else args.input_path # torch tensor with shape [S, D, H, W]
-        print(f"Reconstructed loaders from data.pt.")
+        if p.exists():
+            tfm = torch.load(p, map_location="cpu", weights_only=True) # torch tensor with shape [S, D, H, W]
+            print(f"Reconstructed loaders from data.pt with shape [S, D, H, W].")
+        else:
+            tfm = args.input_path
+            print(f"Reconstructed loaders from data_idx.pt for each scan.")
     else:
         tfm = get_transforms(tuple(args.image_shape))
 
@@ -204,10 +205,12 @@ class PETDataset(Dataset):
             path = row["pet_path"]
             x = self.transforms(path)
         elif torch.is_tensor(self.transforms): # torch tensor with shape  [S, D, H, W]
-            x = self.transforms[idx]
-            x = x.unsqueeze(0)
+            fid = str(int(row["ID"]))
+            x = self.transforms[fid]
+            x = x.unsqueeze(0) # ➜ becomes [1, D, H, W]
         elif isinstance(self.transforms, (str, bytes, os.PathLike)):
-            path = Path(self.transforms) / "data" / "data_{}.pt".format(idx)
+            fid = str(int(row["ID"]))
+            path = Path(self.transforms) / "data" / "data_{}.pt".format(fid)
             x = torch.load(path, map_location="cpu", weights_only=True)
         else:
             raise ValueError('PETDataset(), transforms data loading wrong. Should be either MONAI Compose(), or full torch tensor, or string Path')
