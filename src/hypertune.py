@@ -15,9 +15,6 @@ def objective(trial, base_args, df_clean, splits, model_name):
     # --- hyperparams to be tuned ---
     common = suggest_common(trial, base_args)
     model_name, model_kwargs_json = suggest_model(trial, base_args, common, model_name)
-    # UNet often needs smaller batch sizes
-    bs = common["batch_size"]
-    if model_name == "UNet3D": bs = min(bs, 4)
 
     # proxy settings (shorter training)
     proxy_epochs = getattr(base_args, "proxy_epochs", 8)
@@ -30,37 +27,52 @@ def objective(trial, base_args, df_clean, splits, model_name):
         model_kwargs=model_kwargs_json,       # JSON string only
         lr=common["lr"],
         weight_decay=common["weight_decay"],
-        batch_size=bs,
+        batch_size=common["batch_size"] if model_name != "UNet3D" else min(common["batch_size"], 4), # UNet often needs smaller batch sizes
         dropout=common["dropout"],            # in case your code reads it elsewhere
         epochs=min(base_args.epochs, proxy_epochs),
         output_path=os.path.join(base_args.output_path, f"optuna_trial_{trial.number}"),
+        es_patience=getattr(base_args, "es_patience", 10),
+        es_min_delta=getattr(base_args, "es_min_delta", 1e-3),
     )
 
     # run proxy folds
     scores = []
+    reporter = PruningReporter(trial)  # <— stateful callback
     for i, (tr_idx, va_idx) in enumerate(splits[:proxy_folds], start=1):
         fold_name = f"trial{trial.number}-k{i}"
         train_df = df_clean.iloc[tr_idx].reset_index(drop=True)
         val_df   = df_clean.iloc[va_idx].reset_index(drop=True)
 
         # run one fold (your run_fold already logs/plots inside its own folder)
-        m = run_fold(train_df, val_df, targs, fold_name=fold_name)
+        m = run_fold(train_df, val_df, targs, fold_name=fold_name,
+            es_patience=targs.es_patience, es_min_delta=targs.es_min_delta,
+            on_epoch_end=reporter)
         val = combine_metrics_for_minimize(m)
         scores.append(val)
 
         # pruning support (report intermediate)
-        trial.report(sum(scores)/len(scores), i)
+        trial.report(sum(scores)/len(scores), step=reporter.step)
         if trial.should_prune():
             raise optuna.TrialPruned()
     # plot and log
-    if trial.number % 5 == 0:
-        try:
-            optuna_plot(targs.output_path, trial.study)
-        except Exception:
-            # never break the trial because of plotting I/O
-            pass
+    #if trial.number % 5 == 0:
+    try:
+        optuna_plot(targs.output_path, trial.study)
+    except Exception: # never break the trial because of plotting I/O
+        pass
     return sum(scores)/len(scores)
 
+class PruningReporter:
+    """Keeps a monotonic step counter and reports to Optuna per epoch."""
+    def __init__(self, trial: optuna.trial.Trial):
+        self.trial = trial
+        self.step = 0
+
+    def __call__(self, fold_idx: int, epoch: int, val_loss: float):
+        self.step += 1
+        self.trial.report(val_loss, step=self.step)
+        if self.trial.should_prune():
+            raise optuna.TrialPruned()
 
 def create_study_from_args(args) -> optuna.study.Study:
     """Create an Optuna study using CLI args (direction, storage, pruner)."""
@@ -73,8 +85,16 @@ def create_study_from_args(args) -> optuna.study.Study:
         study_kwargs["storage"] = args.storage
         study_kwargs["load_if_exists"] = True
 
+    # Sampler: explicit TPE with good defaults
+    study_kwargs["sampler"] = optuna.samplers.TPESampler(
+        seed=getattr(args, "seed", None), n_startup_trials=10,
+        multivariate=True, group=True)
+    
     # Default pruner: ASHA
-    study_kwargs["pruner"] = optuna.pruners.SuccessiveHalvingPruner()
+    study_kwargs["pruner"] = optuna.pruners.SuccessiveHalvingPruner(
+        min_resource=1,# start pruning from very early epochs
+        reduction_factor=3,     # 1/3 kept each rung
+        min_early_stopping_rate=0)
 
     return optuna.create_study(**study_kwargs)
 

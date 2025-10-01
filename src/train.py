@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from typing import Any, Tuple, Optional
-from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, mean_squared_error, roc_curve, balanced_accuracy_score, f1_score, matthews_corrcoef
+from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, root_mean_squared_error, roc_curve, balanced_accuracy_score, f1_score, matthews_corrcoef
 
 
 def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w_cls=1.0, loss_w_reg=1.0):
@@ -42,13 +42,38 @@ def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w
 
 @torch.no_grad()
 def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
+    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, loader, device)
+
+    metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
+
+    # robust combined score proxy (only include what exists)
+    parts = []
+    if any_cls: 
+        if np.isfinite(metrics["auc"]): parts.append(metrics["auc"])
+        if np.isfinite(metrics["acc"]): parts.append(metrics["acc"])
+    if any_reg:
+        #yreg = yreg.detach().cpu().numpy() if isinstance(yreg, torch.Tensor) else np.asarray(yreg)
+        yreg = np.concatenate(yreg)
+        mae_ref = np.median(np.abs(yreg - np.median(yreg)))
+        if not np.isfinite(mae_ref) or mae_ref <= 1e-6:
+            mae_ref = max(np.std(yreg), 1e-6)
+        mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan
+        r2_good  = r2 if np.isfinite(r2) else np.nan
+        parts.append(mae_good)
+        parts.append(r2_good)
+
+    metrics["val_metric"] = float(np.sum(parts)) if parts else 0.0  # never NaN
+
+    return metrics
+
+
+@torch.no_grad()
+def evals(model, loader, device):
     model.eval()
+
     probs, ycls, preds = [], [], []
     cents, yreg = [], []
-
-    any_cls = False
-    any_reg = False
-
+    any_cls, any_reg = False, False
     for x, y_cls, y_reg, _ in tqdm(loader, desc="Val", leave=False):
         x = x.to(device)
         out = model(x)
@@ -82,6 +107,12 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
             cents.append(cent.cpu().numpy().ravel())
             yreg.append(y_reg.cpu().numpy().ravel())
 
+    return probs, ycls, preds, any_cls, cents, yreg, any_reg
+
+
+def compute_metrics(ycls, preds, probs, any_cls,
+                    yreg, cents, any_reg):
+    
     metrics = {"auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan, "val_metric": 0.0} #"val_loss": 0.0, 
 
     if any_cls:
@@ -108,25 +139,8 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
         cents = np.concatenate(cents)
         yreg  = np.concatenate(yreg)
         metrics["mae"]  = float(mean_absolute_error(yreg, cents))
-        metrics["rmse"] = float(mean_squared_error(yreg, cents))
+        metrics["rmse"] = float(root_mean_squared_error(yreg, cents))
         metrics["r2"]   = float(r2_score(yreg, cents))
-
-    # robust combined score proxy (only include what exists)
-    parts = []
-    if any_cls: 
-        if np.isfinite(metrics["auc"]): parts.append(metrics["auc"])
-        if np.isfinite(metrics["acc"]): parts.append(metrics["acc"])
-    if any_reg:
-        mae_ref = np.median(np.abs(yreg - np.median(yreg)))
-        if not np.isfinite(mae_ref) or mae_ref <= 1e-6:
-            mae_ref = max(np.std(yreg), 1e-6)
-        mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan
-        r2_good  = r2 if np.isfinite(r2) else np.nan
-        parts.append(mae_good)
-        parts.append(r2_good)
-
-
-    metrics["val_metric"] = float(np.sum(parts)) if parts else 0.0  # never NaN
 
     return metrics
 
@@ -165,6 +179,7 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: Optional[
 
     return total, (logit, cent)
 
+
 def opt_threshold(ycls, probs, pos):
     ybin = (ycls == pos).astype(int)             # binary ground-truth 0/1
     prob1 = probs if probs.ndim == 1 else probs[:, pos]
@@ -185,6 +200,7 @@ def opt_threshold(ycls, probs, pos):
     best_thr= best_thr
 
     return acc_opt, bacc, f1, mcc, best_thr
+
 
 def unpack_model_outputs(out: Any, y_cls, y_reg) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """

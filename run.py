@@ -32,8 +32,16 @@ def main(args):
 
         # Retrain with best params (full epochs) on df_train and evaluate ONCE on df_test
         best_args = get_best_args(args, study, out_subdir="best_params")
+        E_final = cv_median_best_epoch(df_train, stratify_labels_train, best_args)
+        print(f"Final retrain epochs (median best_epoch across folds): {E_final}")
+        best_args_fixed = clone_args(best_args, epochs=E_final)
         print("\nRetraining with best params on full training set…")
-        final_metrics = run_fold(df_train, df_test, best_args, fold_name="outer-test")
+        print(best_args_fixed)
+
+        print("\nRetraining on FULL TRAIN pool with fixed epochs (no early stop), then one-shot TEST eval…")
+        final_metrics = run_fold(df_train, df_test, best_args_fixed, fold_name="outer-test",
+            use_early_stop=False, use_scheduler=False, final_retrain=True)
+
         print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
               f"ACC={final_metrics.get('acc'):.3f} MAE={final_metrics.get('mae'):.2f} "
               f"RMSE={final_metrics.get('rmse'):.2f} R2={final_metrics.get('r2'):.3f}")

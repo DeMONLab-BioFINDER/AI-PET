@@ -111,8 +111,7 @@ def load_participants_labels(input_path: str) -> pd.DataFrame: #cache: Optional[
 # Transforms & Dataset
 # ------------------------------
 def get_train_val_loaders(train_df, val_df, args):
-    g = torch.Generator()
-    g.manual_seed(args.seed)
+
     # Detect cached mode
     use_cache = (not args.data_suffix) or (str(args.data_suffix).strip() == "")
     if use_cache:
@@ -126,17 +125,23 @@ def get_train_val_loaders(train_df, val_df, args):
     else:
         tfm = get_transforms(tuple(args.image_shape))
 
-    ds_tr = PETDataset(train_df, tfm, args.targets, augment=True)
-    ds_va = PETDataset(val_df, tfm, args.targets,  augment=False)
 
-    dl_tr = DataLoader(ds_tr, batch_size=args.batch_size, shuffle=True,
-                       worker_init_fn=seed_worker, generator=g, # seeds numpy/random inside each worker, seeds PyTorch RNG used by the DataLoader (e.g., sampler)
-                       num_workers=args.num_workers, pin_memory=True)
-    dl_va = DataLoader(ds_va, batch_size=max(1, args.batch_size // 2), shuffle=False,
-                       worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed), # seeds numpy/random inside each worker, seeds PyTorch RNG used by the DataLoader (e.g., sampler)
-                       num_workers=args.num_workers, pin_memory=True)
+    dl_tr = get_loader(train_df, tfm, args, batch_size=args.batch_size, augment=True, shuffle=True)
+    dl_va = get_loader(train_df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
     
     return dl_tr, dl_va
+
+
+def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
+    dataset = PETDataset(df, tfm, args.targets, augment=augment)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                       worker_init_fn=seed_worker, generator=g,
+                       num_workers=args.num_workers, pin_memory=True)
+
+    return loader
 
 
 def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: float = 99.0,

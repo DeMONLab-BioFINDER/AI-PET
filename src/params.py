@@ -11,7 +11,7 @@ def parse_arguments():
 
     parser.add_argument("--model", type=str, default="CNN3D",
                 help="Class name in models.py (e.g., CNN3D, UNet3D, ResNet50_3D, DenseNet121_3D...)")
-    parser.add_argument('--model_name_extra', type=str, default="2split_sampled200_param-norm-instance", help='Extra name to be used as the result folder name. E.g. parameters or others tests names')
+    parser.add_argument('--model_name_extra', type=str, default="IDEAS_Inten_Norm", help='Extra name to be used as the result folder name. E.g. parameters or others tests names')
     parser.add_argument("--input_path", type=str, default='', help='images save in BIDS format. If not input, will set as <proj_path>/data')
     parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm')
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
@@ -21,11 +21,11 @@ def parse_arguments():
                     help='JSON string of extra kwargs for the selected model (e.g., \'{"features": 32}\')')
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.3)
     
     # Training
-    parser.add_argument("--epochs", type=int, default=30) # true model should start with 30 
+    parser.add_argument("--epochs", type=int, default=200) # true model should start with 30 
     parser.add_argument("--loss_w_cls", type=float, default=1.0)
     parser.add_argument("--loss_w_reg", type=float, default=1.0)
     parser.add_argument("--num_workers", type=int, default=8) # 8 on the cluster, 2 on mac
@@ -39,9 +39,9 @@ def parse_arguments():
 
     # Hypertune - Optuna
     parser.add_argument("--tune", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--n_trials", type=int, default=30)
-    parser.add_argument("--proxy_epochs", type=int, default=6, help="Epochs per trial (proxy).")
-    parser.add_argument("--proxy_folds", type=int, default=2, help="Folds per trial (proxy).")
+    parser.add_argument("--n_trials", type=int, default=60) #60
+    parser.add_argument("--proxy_epochs", type=int, default=60, help="Epochs per trial (proxy).")
+    parser.add_argument("--proxy_folds", type=int, default=5, help="Folds per trial (proxy).") #5
     parser.add_argument("--study_name", type=str, default="optuna")
     parser.add_argument("--storage", type=str, default="", help='Optuna storage, e.g. "sqlite:///optuna.db"')
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
@@ -91,7 +91,8 @@ def make_output_dir(args, proj_path, script_path):
     args.script_path = script_path
     if not args.input_path: args.input_path = os.path.join(proj_path, "data") # set input path to <proj_path>/data is not stated
     # Construct output path'
-    args.output_name = "_".join([args.model, args.targets, args.model_name_extra, f'stratify-{args.stratifycvby}', args.output_date_time])
+    tune = f'hypertune-optuna-{args.n_trials}trials' if args.tune else '2split80-20'
+    args.output_name = "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, args.output_date_time])
     args.output_path = os.path.join(proj_path, "results", args.output_name)
 
     # Create output directory
