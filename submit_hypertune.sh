@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks=1                 # one launcher task
 #SBATCH -t 3-00:00:00
-#SBATCH -J VR-tune
+#SBATCH -J CL-tune
 
 
 # Load your environment
@@ -17,9 +17,9 @@ mamba activate ai-pet
 # Execute your code
 srun --ntasks=8 --gres=gpu:1 --cpus-per-task=8 \
   bash -lc 'CUDA_VISIBLE_DEVICES=$SLURM_LOCALID \
-    python run.py \
+    python run.py --targets CL \
       --ddp 1 \
-      --storage sqlite:////scratc/proj/berzelius-2024-156/users/x_yxiao/AI-PET/scripts/optuna_ai_pet_VR.db \
+      --storage sqlite:////scratc/proj/berzelius-2024-156/users/x_yxiao/AI-PET/scripts/optuna_ai_pet_CL.db \
       --n_trials 999999 \
       --tune_timeout 86400 \
       --num_workers 4 '
