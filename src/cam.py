@@ -157,6 +157,123 @@ def save_gradcam_overlays(model, cam, loader, out_dir, device, max_items=8):
             count += 1
 
 
+def save_gradcam_overlays_avg_by_slice(model, cam, loader, out_dir, device, max_items=None,
+    slice_fracs=(0.25, 0.5, 0.75), overlay_cam=True,
+    clip_percentile=0.5, cmap_img="gray", cam_alpha=0.4):
+    """
+    Computes the average volume (and average CAM) across subjects, then
+    saves ONE figure per slice position. Each figure has 3 subplots:
+    Axial / Coronal / Sagittal for that slice position.
+
+    Args
+    ----
+    model, cam, loader, device : as usual
+    out_dir : str
+    max_items : int | None  cap subjects used (None = all)
+    slice_fracs : tuple[float]  positions in [0,1] along each axis
+    overlay_cam : bool  overlay mean CAM if True
+    clip_percentile : float  robust intensity scaling (0–2 recommended)
+    cmap_img : str  matplotlib cmap for base image
+    cam_alpha : float  overlay transparency
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    sum_vol, sum_cam, n_seen = None, None, 0
+
+    for x, y_cls, y_reg, pid in loader:
+        if max_items is not None and n_seen >= max_items:
+            break
+
+        b = x.shape[0]
+        if max_items is not None:
+            b = min(b, max_items - n_seen)
+            x = x[:b]
+
+        x = x.to(device, non_blocking=True)
+
+        with torch.enable_grad():
+            heat = cam(x)  # [B,1,D,H,W] (will resize)
+
+        if heat.shape[2:] != x.shape[2:]:
+            heat = F.interpolate(heat, size=x.shape[2:], mode="trilinear", align_corners=False)
+
+        x_np = x.detach().cpu().numpy()[:, 0]      # [B, D, H, W]
+        h_np = heat.detach().cpu().numpy()[:, 0]   # [B, D, H, W]
+
+        if sum_vol is None:
+            sum_vol = np.zeros_like(x_np[0], dtype=np.float64)
+            if overlay_cam:
+                sum_cam = np.zeros_like(h_np[0], dtype=np.float64)
+
+        sum_vol += x_np[:b].sum(axis=0)  # true sum
+        if overlay_cam:
+            sum_cam += h_np[:b].sum(axis=0)
+
+        n_seen += b
+    print('finish loading')
+    if n_seen == 0:
+        print("No data encountered — nothing saved.")
+        return
+
+    mean_vol = sum_vol / n_seen
+    mean_cam = (sum_cam / n_seen) if overlay_cam else None
+
+    D, H, W = mean_vol.shape
+
+    def frac_to_idx(f, L):
+        f = float(np.clip(f, 0.0, 1.0))
+        return int(round(f * (L - 1)))
+
+    # robust display range for the mean image
+    if clip_percentile is not None:
+        lo = np.percentile(mean_vol, max(0, 50 - clip_percentile * 50))
+        hi = np.percentile(mean_vol, min(100, 50 + clip_percentile * 50))
+        lo, hi = float(lo), float(hi)
+    else:
+        lo, hi = float(mean_vol.min()), float(mean_vol.max())
+
+    # optional CAM normalization per-view for nicer overlays
+    def norm_cam(arr):
+        vmin, vmax = np.percentile(arr, 1), np.percentile(arr, 99)
+        vmax = vmax if vmax > vmin else vmin + 1e-6
+        return np.clip((arr - vmin) / (vmax - vmin + 1e-12), 0, 1)
+
+    # ---- Save one figure per slice fraction ----
+    for f in slice_fracs:
+        z = frac_to_idx(f, D)
+        y = frac_to_idx(f, H)
+        xidx = frac_to_idx(f, W)
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        # Axial
+        axes[0].imshow(mean_vol[z, :, :], cmap=cmap_img, vmin=lo, vmax=hi)
+        if overlay_cam:
+            axes[0].imshow(norm_cam(mean_cam[z, :, :]), alpha=cam_alpha)
+        axes[0].set_title(f"Axial (z={z}, f={f:.2f})")
+        axes[0].axis("off")
+
+        # Coronal
+        axes[1].imshow(mean_vol[:, y, :], cmap=cmap_img, vmin=lo, vmax=hi)
+        if overlay_cam:
+            axes[1].imshow(norm_cam(mean_cam[:, y, :]), alpha=cam_alpha)
+        axes[1].set_title(f"Coronal (y={y}, f={f:.2f})")
+        axes[1].axis("off")
+
+        # Sagittal
+        axes[2].imshow(mean_vol[:, :, xidx], cmap=cmap_img, vmin=lo, vmax=hi)
+        if overlay_cam:
+            axes[2].imshow(norm_cam(mean_cam[:, :, xidx]), alpha=cam_alpha)
+        axes[2].set_title(f"Sagittal (x={xidx}, f={f:.2f})")
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        fname = os.path.join(out_dir, f"avg_axcorSag_f{f:.2f}.png")
+        plt.savefig(fname, dpi=150)
+        plt.close(fig)
+
+    print(f"Saved {len(slice_fracs)} figures (n={n_seen}) to: {out_dir}")
+
+
 def save_gradcam_nifti(model, cam, loader, out_dir, device, max_items=999, use_ref_affine=True):
     """
     Save Grad-CAM volumes as NIfTI in the model input space (post-preprocessing).

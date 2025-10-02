@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from src.data import get_train_val_loaders
 from src.early_stopping import EarlyStopper
 from src.train import train_one_epoch, eval_epoch
-from src.cam import find_last_conv3d, GradCAM3D, save_gradcam_overlays
+from src.cam import find_last_conv3d, GradCAM3D, save_gradcam_overlays_avg_by_slice
 from src.utils import append_metrics_row, save_checkpoint, build_model_from_args, append_epoch_metrics_csv, plot_metrics_from_csv, save_train_test_subjects
 
 
@@ -41,7 +41,7 @@ def kfold_cv(df_clean, stratify_labels, args):
 
 
 def run_fold(train_df, val_df, args, fold_name: str, *, 
-             use_early_stop: bool = True, es_patience=10, es_min_delta=1e-3,
+             use_early_stop: bool = True, es_patience=10, es_min_delta=1e-2,
              use_scheduler: bool = True, final_retrain: bool = False, on_epoch_end=None):
     """
     Train and return metrics dict.
@@ -147,7 +147,7 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
         last_metrics = eval_epoch(model, dl_va, args.device)
         task = "cls" if not np.isnan(metrics['auc']) else ("reg" if not np.isnan(metrics['r2']) else "auto")
         cam = GradCAM3D(model, target_layer=target_layer, task=task)
-        save_gradcam_overlays(model, cam, dl_va, viz_dir, args.device, max_items=8)
+        save_gradcam_overlays_avg_by_slice(model, cam, dl_va, viz_dir, args.device, max_items=8)
 
         # metrics to return (CV)
         final_metrics = last_metrics

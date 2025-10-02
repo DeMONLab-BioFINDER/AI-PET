@@ -58,7 +58,7 @@ def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
         if not np.isfinite(mae_ref) or mae_ref <= 1e-6:
             mae_ref = max(np.std(yreg), 1e-6)
         mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan
-        r2_good  = r2 if np.isfinite(r2) else np.nan
+        r2_good  = metrics["r2"] if np.isfinite(metrics["r2"]) else np.nan
         parts.append(mae_good)
         parts.append(r2_good)
 

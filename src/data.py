@@ -127,7 +127,7 @@ def get_train_val_loaders(train_df, val_df, args):
 
 
     dl_tr = get_loader(train_df, tfm, args, batch_size=args.batch_size, augment=True, shuffle=True)
-    dl_va = get_loader(train_df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
+    dl_va = get_loader(val_df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
     
     return dl_tr, dl_va
 

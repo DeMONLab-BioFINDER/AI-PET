@@ -58,7 +58,7 @@ def get_device(prefer_cuda=True, force_cpu=False):
     has_cuda = torch.cuda.is_available()
     has_mps = getattr(torch.backends, "mps", None) is not None \
               and torch.backends.mps.is_built() and torch.backends.mps.is_available()
-    if prefer_cuda and has_cuda: return torch.device("cuda")
+    if prefer_cuda and has_cuda and not force_cpu: return torch.device("cuda")
     if not prefer_cuda and has_mps: return torch.device("mps")
     if not force_cpu and has_cuda: return torch.device("cuda")
     if not force_cpu and has_mps: return torch.device("mps")
@@ -223,12 +223,13 @@ def plot_metrics_from_csv(csv_path: str, out_png: str):
     ax1 = plt.gca()
 
     x = df["epoch"]
-    if cls and reg:
-        _plot_lines(ax1, x, df, cls, "Classification")
-        ax2 = ax1.twinx()
-        _plot_lines(ax2, x, df, reg, "Regression")
-    else:
-        _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
+    #if cls and reg:
+    #    _plot_lines(ax1, x, df, cls, "Classification")
+    #    ax2 = ax1.twinx()
+    #    _plot_lines(ax2, x, df, reg, "Regression")
+    #else:
+    #    _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
+    _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
 
     ax1.set_xlabel("Epoch")
     plt.title("Validation metrics per epoch")

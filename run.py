@@ -4,7 +4,7 @@ ignore_warnings()
 from src.params import parse_arguments
 from src.utils import get_device, set_seed, make_splits, hold_out_set, save_train_test_subjects, clone_args
 from src.data import build_master_table
-from src.cv import get_stratify_labels, kfold_cv, run_fold
+from src.cv import get_stratify_labels, kfold_cv, run_fold, cv_median_best_epoch
 from src.hypertune import create_study_from_args, run_optuna, objective, print_best, get_best_args
 
 
@@ -55,6 +55,8 @@ def main(args):
         print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
               f"ACC={final_metrics.get('acc'):.3f} MAE={final_metrics.get('mae'):.2f} "
               f"RMSE={final_metrics.get('rmse'):.2f} R2={final_metrics.get('r2'):.3f}")
+
+    print('DONE!')
 
 if __name__ == "__main__":
     args = parse_arguments()
