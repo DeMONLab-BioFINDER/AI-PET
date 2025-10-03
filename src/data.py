@@ -1,9 +1,10 @@
 # src/data.py
 import os
+import re
 import torch
 import pandas as pd
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from torch.utils.data import DataLoader, Dataset, Subset
 from monai.data import MetaTensor
 from monai.transforms import (LoadImage, EnsureChannelFirst, Orientation, Resize,
@@ -27,7 +28,7 @@ def build_master_table(input_path: str, preproc_method: str, targets: List[str],
         df = pd.read_csv(Path(input_path) / "demo.csv", index_col=0) # Must have 'ID' column from 0 to len(df)
         print(f"[cache] Loaded demo.csv with {len(df)} rows (no filesystem scan).")
     else:
-        pets = find_pet_files(input_path=input_path, preproc_method=preproc_method, subjects_list=subjects)
+        pets = find_pet_files(input_path=input_path, preproc_method=preproc_method, allow=subjects)
         if pets.empty:
             raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix '_{preproc_method}'.")
         else:
@@ -44,7 +45,7 @@ def build_master_table(input_path: str, preproc_method: str, targets: List[str],
 
     return df
 
-
+'''
 def find_pet_files(input_path: str, preproc_method: str, subjects_list: Optional[str] = None) -> pd.DataFrame:
     """
     Glob-only discovery of PET NIfTI files under:
@@ -84,6 +85,91 @@ def find_pet_files(input_path: str, preproc_method: str, subjects_list: Optional
         allow = pd.read_csv(subjects_path)
         subj_set = {str(s).strip() for s in allow['ID'] if str(s).strip()} # .strip() remove white spaces
         df = df[df["ID"].astype(str).isin(subj_set)].reset_index(drop=True)
+
+    return df
+'''
+
+def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[pd.DataFrame, str, Path]] = None) -> pd.DataFrame:
+    """
+    Discover PET NIfTI files via:
+      (A) input_path/PET/**/*_{preproc_method}/*/*/*.nii*
+      (B) input_path/<ID>/PET_<ScanDate>_<tracer>/SCANS/*.nii[.gz], tracer in {FBB, FBP}
+
+    If `allow` (DataFrame or CSV) is provided:
+      - must contain 'ID'; optional 'ScanDate'
+      - if only 'ID': filter by ID (keep all columns combined)
+      - if 'ID' + 'ScanDate': inner-join on both (keep all columns combined)
+    """
+    ipath = Path(input_path)
+    rows = []
+
+    # Pattern A
+    root_a = ipath / "PET"
+    pattern_a = f"**/*{preproc_method}/*/*/*.nii*"
+    if root_a.exists():
+        for nii in root_a.glob(pattern_a):
+            try:
+                sid = nii.relative_to(root_a).parts[0]
+            except Exception:
+                continue
+            rows.append({
+                "ID": str(sid),
+                "pet_path": str(nii).replace('/._','/'),
+                "imagefile": nii.name,
+                "ScanDate": None,
+                "tracer": None,
+            })
+
+    # Pattern B
+    regex_b = re.compile(
+        r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$'
+    )
+    for nii in ipath.rglob("*.nii*"):
+        m = regex_b.match(nii.relative_to(ipath).as_posix())
+        if not m: 
+            continue
+        rows.append({
+            "ID": m.group("ID"),
+            "pet_path": str(nii),
+            "imagefile": nii.name,
+            "ScanDate": m.group("ScanDate"),
+            "tracer": m.group("tracer"),
+        })
+
+    df = pd.DataFrame(rows, columns=["ID", "pet_path", "imagefile", "ScanDate", "tracer"])
+    if df.empty:
+        return df
+
+    # Deterministic dedupe: keep first path per ID
+    df = (df.sort_values(["ID", "pet_path"])
+            .groupby("ID", as_index=False, group_keys=False)
+            .head(1).reset_index(drop=True))
+
+    # --- Unified filtering / intersection with `allow` ---
+    if allow is not None:
+        if isinstance(allow, (str, Path)):
+            allow_df = pd.read_csv(input_path + allow, index_col=0)
+        else:
+            allow_df = allow.copy()
+
+        if "ID" not in allow_df.columns:
+            raise ValueError("`allow` must contain column 'ID'.")
+
+        # Normalize types
+        df["ID"] = df["ID"].astype(str)
+        allow_df["ID"] = allow_df["ID"].astype(str)
+
+        has_date = "ScanDate" in allow_df.columns
+        if has_date:
+            # ensure YYYY-MM-DD strings
+            allow_df["ScanDate"] = pd.to_datetime(allow_df["ScanDate"]).dt.strftime("%Y-%m-%d")
+            df["ScanDate"] = df["ScanDate"].astype(str).str.slice(0,10)
+            keys = ["ID", "ScanDate"]
+        else:
+            keys = ["ID"]
+
+        df = pd.merge(df, allow_df, on=keys, how="inner", suffixes=("", "_allow"))
+        df = df.sort_values(keys + [c for c in ["pet_path"] if c in df.columns]).reset_index(drop=True)
 
     return df
 
@@ -138,8 +224,8 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
 
     dataset = PETDataset(df, tfm, args.targets, augment=augment)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                       worker_init_fn=seed_worker, generator=g,
-                       num_workers=args.num_workers, pin_memory=True)
+                        worker_init_fn=seed_worker, generator=g,
+                        num_workers=args.num_workers, pin_memory=False)
 
     return loader
 

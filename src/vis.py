@@ -1,3 +1,4 @@
+import os
 import torch, nibabel as nib
 import numpy as np
 from monai.visualize.occlusion_sensitivity import OcclusionSensitivity
@@ -44,7 +45,7 @@ def group_occlusion_maps(model, paths, out_dir: str, *,
 
     all_sums, all_sqsum, n_total = None, None, 0
     for nii_path in paths:
-        if n_total== 0
+        if n_total== 0:
             heat, ref_affine = explain_one_occlusion(model, nii_path, return_affine=True, mask_size=mask_size, overlap=overlap, activate=activate, device=device) # [D,H,W]
         else:
             heat, _ = explain_one_occlusion(model, nii_path, return_affine=False, mask_size=mask_size, overlap=overlap, activate=activate, device=device) # [D,H,W]
