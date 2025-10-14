@@ -45,7 +45,11 @@ def parse_arguments():
     parser.add_argument("--study_name", type=str, default="optuna")
     parser.add_argument("--storage", type=str, default="", help='Optuna storage, e.g. "sqlite:///optuna.db"')
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
- 
+    
+    # Validation / Testing
+    parser.add_argument("--dataset", type=str, default="IDEAS", choices=['ADNI', 'IDEAS'], help="Dataset name, ADNI or IDEAS")
+    parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_02221", help="Path to the folder that contains the best model checkpoint for external validation.")
+    
     # Parse arguments and set up the output directory
     args, unknown = parser.parse_known_args()
     args = make_output_dir(args, proj_path, script_dir)
@@ -90,10 +94,16 @@ def make_output_dir(args, proj_path, script_path):
     args.proj_path = proj_path
     args.script_path = script_path
     if not args.input_path: args.input_path = os.path.join(proj_path, "data") # set input path to <proj_path>/data is not stated
-    # Construct output path'
-    tune = f'hypertune-optuna-{args.n_trials}trials' if args.tune else '2split80-20'
-    args.output_name = "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, args.output_date_time])
-    args.output_path = os.path.join(proj_path, "results", args.output_name)
+
+    # Construct validation path
+    if args.best_model_folder and not os.path.isabs(args.best_model_folder):
+        args.best_model_folder = os.path.join(args.proj_path, "results", args.best_model_folder)
+        args.output_path = os.path.join(args.best_model_folder, 'validation')
+    else:
+        # Construct output path'
+        tune = f'hypertune-optuna-{args.n_trials}trials' if args.tune else '2split80-20'
+        args.output_name = "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, args.output_date_time])
+        args.output_path = os.path.join(proj_path, "results", args.output_name)
 
     # Create output directory
     os.makedirs(args.output_path, exist_ok=True)
