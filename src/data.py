@@ -14,27 +14,27 @@ from src.utils import seed_worker
 # ------------------------------
 # Master table
 # ------------------------------
-def build_master_table(input_path: str, preproc_method: str, targets: List[str], subjects: Optional[List[str]] = None) -> pd.DataFrame:
+def build_master_table(input_path: str, dataset_info: str, targets: List[str], subjects: Optional[List[str]] = None) -> pd.DataFrame:
     """
     Build the table required by the training code, given the custom folder layout.
     Normal mode: discover images + join demographics.
-    Cached mode: if preproc_method is empty/None OR cache files exist in cache_dir,
+    Cached mode: if dataset_info is empty/None OR cache files exist in cache_dir,
                  load demo.csv only (no disk scans), and return that table.
     In cached mode, adds 'ID' to preserve the order matching data.pt.
     """
     # Detect cached mode
-    use_cache = (not preproc_method) or (str(preproc_method).strip() == "")
+    use_cache = (not dataset_info) or (str(dataset_info).strip() == "")
     if use_cache:
         df = pd.read_csv(Path(input_path) / "demo.csv", index_col=0) # Must have 'ID' column from 0 to len(df)
         print(f"[cache] Loaded demo.csv with {len(df)} rows (no filesystem scan).")
     else:
-        pets = find_pet_files(input_path=input_path, preproc_method=preproc_method, allow=subjects)
+        pets = find_pet_files(input_path=input_path, preproc_method=dataset_info, allow=subjects)
         if pets.empty:
-            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix '_{preproc_method}'.")
+            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix / for dataset '_{dataset_info}'.")
         else:
             print(f'Found {pets.shape[0]} scans')
 
-        labels = load_participants_labels(input_path)
+        labels = load_participants_labels(input_path, dataset=dataset_info)
         labels["ID"] = labels["ID"].astype(str).str.strip()
         df = pd.merge(pets, labels, on="ID", how="inner")
 
@@ -120,7 +120,8 @@ def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[p
                 "tracer": None,
             })
 
-    # Pattern B
+    # Pattern B -- ADNI data on Berkeley cluster
+    # e.g. /116-S-6550/PET_2018-08-29_FTP/SCANS/116-S-6550_AV1451_2018-08-29_P4-6mm_I1600375.nii
     regex_b = re.compile(
         r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$'
     )
@@ -174,14 +175,17 @@ def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[p
     return df
 
 
-def load_participants_labels(input_path: str) -> pd.DataFrame: #cache: Optional[bool] = False
+def load_participants_labels(input_path: str, dataset: Optional[str] = None) -> pd.DataFrame: #cache: Optional[bool] = False
     """
     Load demographics.csv from input_path and return:
     ID, site, visual_read, CL, age, gender
     """
     csv = Path(input_path) / "demographics.csv"
-    if not csv.exists():
-        raise FileNotFoundError(f"Missing {csv}. Provide columns: ID, site, visual_read, CL, age, gender, ...")
+    if not csv.exists(): # try alternative path
+        proj_path = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        csv = Path(os.path.join(proj_path, "data")) / f"demographics_{dataset}.csv"
+        if not csv.exists():
+            raise FileNotFoundError(f"Missing {csv}. Provide columns: ID, site, visual_read, CL, age, gender, ...")
     df = pd.read_csv(csv, index_col=0)
     
     # Ensure required columns are present in the dataframe.

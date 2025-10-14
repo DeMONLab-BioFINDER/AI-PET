@@ -13,7 +13,7 @@ from src.train import evals, compute_metrics
 
 
 def main(args):
-    if args.dataset == 'ADNI':
+    if args.dataset == 'ADNI': # Berkeley server, load NIfTI files
         test_set = os.path.join(args.input_path, 'ADNI_found_scans.csv')
         if os.path.exists(test_set):
             print('loading validation dataframe')
@@ -23,7 +23,7 @@ def main(args):
             df = build_master_table(args.input_path, args.data_suffix, args.targets, subjects='demographics_adni.csv')
             df.to_csv(os.path.join(args.input_path, 'ADNI_found_scans.csv'))
         tfm = get_transforms()
-    elif args.dataset == 'IDEAS':
+    elif args.dataset == 'IDEAS': # Berzelius, load torch tensors
         print('Validate on IDEAS test set...')
         test_set = os.path.join(args.best_model_folder,'Hold-out_testing-set.csv')
         print(test_set)
