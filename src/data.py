@@ -14,27 +14,27 @@ from src.utils import seed_worker
 # ------------------------------
 # Master table
 # ------------------------------
-def build_master_table(input_path: str, dataset_info: str, targets: List[str], subjects: Optional[List[str]] = None) -> pd.DataFrame:
+def build_master_table(input_path: str, preproce_method: str, targets: List[str], dataset: str, subjects: Optional[List[str]] = None) -> pd.DataFrame:
     """
     Build the table required by the training code, given the custom folder layout.
     Normal mode: discover images + join demographics.
-    Cached mode: if dataset_info is empty/None OR cache files exist in cache_dir,
+    Cached mode: if preproce_method is empty/None OR cache files exist in cache_dir,
                  load demo.csv only (no disk scans), and return that table.
     In cached mode, adds 'ID' to preserve the order matching data.pt.
     """
     # Detect cached mode
-    use_cache = (not dataset_info) or (str(dataset_info).strip() == "")
+    use_cache = (not preproce_method) or (str(preproce_method).strip() == "")
     if use_cache:
         df = pd.read_csv(Path(input_path) / "demo.csv", index_col=0) # Must have 'ID' column from 0 to len(df)
         print(f"[cache] Loaded demo.csv with {len(df)} rows (no filesystem scan).")
     else:
-        pets = find_pet_files(input_path=input_path, preproc_method=dataset_info, allow=subjects)
+        pets = find_pet_files(input_path=input_path, preproc_method=preproce_method, allow=subjects)
         if pets.empty:
-            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix / for dataset '_{dataset_info}'.")
+            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix  '_{preproce_method}' for dataset '_{dataset}'.")
         else:
             print(f'Found {pets.shape[0]} scans')
 
-        labels = load_participants_labels(input_path, dataset=dataset_info)
+        labels = load_participants_labels(input_path, dataset=dataset)
         labels["ID"] = labels["ID"].astype(str).str.strip()
         df = pd.merge(pets, labels, on="ID", how="inner")
 

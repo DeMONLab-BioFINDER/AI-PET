@@ -14,14 +14,14 @@ from src.train import evals, compute_metrics
 
 def main(args):
     if args.dataset == 'ADNI': # Berkeley server, load NIfTI files
-        test_set = os.path.join(args.input_path, 'ADNI_found_scans.csv')
+        test_set = os.path.join(args.input_path, f'ADNI_found_scans_{args.targets}.csv')
         if os.path.exists(test_set):
             print('loading validation dataframe')
             df = pd.read_csv(test_set, index_col=0)
         else:
             print('finding scans from folder')
-            df = build_master_table(args.input_path, args.data_suffix, args.targets, subjects='demographics_adni.csv')
-            df.to_csv(os.path.join(args.input_path, 'ADNI_found_scans.csv'))
+            df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
+            df.to_csv(os.path.join(args.input_path, f'ADNI_found_scans_{args.targets}.csv'))
         tfm = get_transforms()
     elif args.dataset == 'IDEAS': # Berzelius, load torch tensors
         print('Validate on IDEAS test set...')

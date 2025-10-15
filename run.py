@@ -10,7 +10,7 @@ from src.hypertune import create_study_from_args, run_optuna, objective, print_b
 
 def main(args):
     # 1) data
-    df = build_master_table(args.input_path, args.data_suffix, args.targets)
+    df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
     df_clean, stratify_labels = get_stratify_labels(df, args.stratifycvby)
 
     # held-out set (never touch during hyperparameter tunning
