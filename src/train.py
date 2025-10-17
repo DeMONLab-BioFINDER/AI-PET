@@ -110,8 +110,7 @@ def evals(model, loader, device):
     return probs, ycls, preds, any_cls, cents, yreg, any_reg
 
 
-def compute_metrics(ycls, preds, probs, any_cls,
-                    yreg, cents, any_reg):
+def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
     
     metrics = {"auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan, "val_metric": 0.0} #"val_loss": 0.0, 
 
@@ -119,6 +118,13 @@ def compute_metrics(ycls, preds, probs, any_cls,
         ycls  = np.concatenate(ycls)
         preds = np.concatenate(preds)
         probs = np.concatenate(probs, axis=0)   # [N,out_channel]
+
+        # ignore nans
+        pr_mask = np.isfinite(probs) if probs.ndim == 1 else np.isfinite(probs).all(axis=1)
+        mask_acc = np.isfinite(preds) & pr_mask # use preds to mask, as y has masked out nans in input
+        ycls = ycls[mask_acc]
+        preds = preds[mask_acc]
+        probs = probs[mask_acc] if probs.ndim == 1 else probs[mask_acc, :]
 
         labels = np.unique(ycls).astype(int)
         if probs.ndim == 1:
@@ -138,6 +144,12 @@ def compute_metrics(ycls, preds, probs, any_cls,
     if any_reg:
         cents = np.concatenate(cents)
         yreg  = np.concatenate(yreg)
+
+        # ignore nans
+        mask_reg = np.isfinite(cents) # use cents to mask, as y has masked out nans in input
+        yreg = yreg[mask_reg]
+        cents = cents[mask_reg]
+
         metrics["mae"]  = float(mean_absolute_error(yreg, cents))
         metrics["rmse"] = float(root_mean_squared_error(yreg, cents))
         metrics["r2"]   = float(r2_score(yreg, cents))

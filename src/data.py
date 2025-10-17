@@ -30,13 +30,25 @@ def build_master_table(input_path: str, preproce_method: str, targets: List[str]
     else:
         pets = find_pet_files(input_path=input_path, preproc_method=preproce_method, allow=subjects)
         if pets.empty:
-            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix  '_{preproce_method}' for dataset '_{dataset}'.")
+            raise FileNotFoundError(f"No NIfTI files found under '{input_path}' with preproc suffix  '{preproce_method}' for dataset '{dataset}'.")
         else:
             print(f'Found {pets.shape[0]} scans')
+            print(pets.columns, pets.head(3))
 
         labels = load_participants_labels(input_path, dataset=dataset)
         labels["ID"] = labels["ID"].astype(str).str.strip()
-        df = pd.merge(pets, labels, on="ID", how="inner")
+        #df = pd.merge(pets, labels, on="ID", how="inner")
+        has_date = "ScanDate" in labels.columns
+        if has_date:
+            # ensure YYYY-MM-DD strings
+            labels["ScanDate"] = pd.to_datetime(labels["ScanDate"]).dt.strftime("%Y-%m-%d")
+            pets["ScanDate"] = pets["ScanDate"].astype(str).str.slice(0,10)
+            keys = ["ID", "ScanDate"]
+        else:
+            keys = ["ID"]
+
+        df = pd.merge(pets, labels, on=keys, how="inner", suffixes=("", "_selected"))
+        df = df.sort_values(keys + [c for c in ["pet_path"] if c in df.columns]).reset_index(drop=True)
 
         # Only scans with targets value
         targets_list = [t.strip() for t in targets.split(",") if t.strip()]
@@ -45,49 +57,6 @@ def build_master_table(input_path: str, preproce_method: str, targets: List[str]
 
     return df
 
-'''
-def find_pet_files(input_path: str, preproc_method: str, subjects_list: Optional[str] = None) -> pd.DataFrame:
-    """
-    Glob-only discovery of PET NIfTI files under:
-        input_path/**/*_{preproc_method}/*/*/*.nii*
-    Picks exactly one file per subject (first by sorted path).
-
-    Returns columns: ID, pet_path, imagefile, site_from_path(None).
-    """
-    root = Path(input_path + '/PET/')
-    suffix = f"{preproc_method}"
-    pattern = f"**/*{suffix}/*/*/*.nii*"
-
-    rows = []
-    for nii in root.glob(pattern):
-        # subjectID assumed as the top-level folder under input_path
-        try:
-            sid = nii.relative_to(root).parts[0]
-        except Exception:
-            continue
-        rows.append({"ID": sid,
-                     "pet_path": str(nii).replace('/._','/'), # !!! make this better later
-                     "imagefile": nii.name,
-                     #"site_from_path": None,
-        })
-
-    df = pd.DataFrame(rows)
-    if df.empty: return df
-    # Deterministic: sort only keep the first scan per subject
-    df = (df.sort_values(["ID", "pet_path"])
-            .groupby("ID", as_index=False, group_keys=False)
-            .head(1).reset_index(drop=True))
-    
-    # Optional filter to provided subject list
-    if subjects_list:
-        subjects_path = input_path / subjects_list
-        if not subjects_path.exists(): raise ValueError(f'Input {subjects_list} not exists')
-        allow = pd.read_csv(subjects_path)
-        subj_set = {str(s).strip() for s in allow['ID'] if str(s).strip()} # .strip() remove white spaces
-        df = df[df["ID"].astype(str).isin(subj_set)].reset_index(drop=True)
-
-    return df
-'''
 
 def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[pd.DataFrame, str, Path]] = None) -> pd.DataFrame:
     """
@@ -122,15 +91,27 @@ def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[p
 
     # Pattern B -- ADNI data on Berkeley cluster
     # e.g. /116-S-6550/PET_2018-08-29_FTP/SCANS/116-S-6550_AV1451_2018-08-29_P4-6mm_I1600375.nii
-    regex_b = re.compile(
-        r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$'
-    )
-    for nii in ipath.rglob("*.nii*"):
+    if '.nii' in preproc_method:
+        print(f'finding ADNI data /analysis/{preproc_method}')
+        method_pat = re.escape(preproc_method) + r'(?:\.gz)?'
+        regex_b = re.compile(
+            rf'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{{4}}-\d{{2}}-\d{{2}})_(?P<tracer>FBB|FBP)/analysis/{re.escape(preproc_method)}$')
+        #regex_b = re.compile(
+        #    r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/analysis/'r'wsuvr_cere[^/]*\.nii(?:\.gz)?$')
+        glob_pattern = "*analysis/*.nii*"
+    else: # step 4 ADNI data
+        print(f'finding ADNI data /SCANS/')
+        regex_b = re.compile(
+            r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$')
+        glob_pattern = "*SCANS/*.nii*"
+    print("PATTERN:", regex_b.pattern)
+    
+    for nii in ipath.rglob(glob_pattern):
         m = regex_b.match(nii.relative_to(ipath).as_posix())
         if not m: 
             continue
         rows.append({
-            "ID": m.group("ID"),
+            "ID": m.group("ID").replace('-','_'),
             "pet_path": str(nii),
             "imagefile": nii.name,
             "ScanDate": m.group("ScanDate"),
@@ -188,9 +169,9 @@ def load_participants_labels(input_path: str, dataset: Optional[str] = None) -> 
             raise FileNotFoundError(f"Missing {csv}. Provide columns: ID, site, visual_read, CL, age, gender, ...")
     df = pd.read_csv(csv, index_col=0)
     
+    print('loaded participants:', df.shape, df.columns, df.head(3))
     # Ensure required columns are present in the dataframe.
     required = {"ID", "site", "visual_read", "CL", "age", "gender"}
-    #if cache: required.discard("ID")
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")

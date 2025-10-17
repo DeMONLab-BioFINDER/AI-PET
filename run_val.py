@@ -11,19 +11,23 @@ from src.utils import build_model_from_args, get_device, set_seed
 from src.data import build_master_table, get_transforms, get_loader
 from src.train import evals, compute_metrics
 
+import torch.multiprocessing as mp
+os.environ["NIBABEL_KEEP_FILE_OPEN"] = "0"
+mp.set_sharing_strategy("file_system")
 
 def main(args):
-    if args.dataset == 'ADNI': # Berkeley server, load NIfTI files
-        test_set = os.path.join(args.input_path, f'ADNI_found_scans_{args.targets}.csv')
+    if 'ADNI' in args.dataset: # Berkeley server, load NIfTI files
+        print('Validate on ADNI test set...')
+        test_set = os.path.join(args.proj_path, "data", f'{args.dataset}_found_scans_{args.data_suffix}_{args.targets}.csv')
         if os.path.exists(test_set):
             print('loading validation dataframe')
             df = pd.read_csv(test_set, index_col=0)
         else:
             print('finding scans from folder')
             df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
-            df.to_csv(os.path.join(args.input_path, f'ADNI_found_scans_{args.targets}.csv'))
+            df.to_csv(os.path.join(args.proj_path, "data", f'{args.dataset}_found_scans_{args.data_suffix}_{args.targets}.csv'))
         tfm = get_transforms()
-    elif args.dataset == 'IDEAS': # Berzelius, load torch tensors
+    elif 'IDEAS' in args.dataset: # Berzelius, load torch tensors
         print('Validate on IDEAS test set...')
         test_set = os.path.join(args.best_model_folder,'Hold-out_testing-set.csv')
         print(test_set)
@@ -44,7 +48,7 @@ def main(args):
         df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 'pred':np.concatenate(preds, axis=0), 'prob':np.concatenate(probs, axis=0)})
     elif 'CL' in targets_list:
         df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0), 'pred':np.concatenate(cents, axis=0)})
-    df_result.to_csv(os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.targets}.csv'))
+    df_result.to_csv(os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}.csv'))
 
     metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
     print(metrics)

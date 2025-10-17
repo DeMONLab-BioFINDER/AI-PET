@@ -3,26 +3,32 @@ import os
 import argparse
 from datetime import datetime
 
+from src.utils import get_device
+
 def parse_arguments():
     # Load essential settings from external file if available
     script_dir, proj_path = get_proj_path()
 
-    parser = argparse.ArgumentParser(description="Aβ-PET → visual read (binary) / Centiloid (regression) with Optuna hyperparameter tuning.")
+    parser = argparse.ArgumentParser(description="Aβ-PET -> visual read (binary) / Centiloid (regression) with Optuna hyperparameter tuning.")
 
-    parser.add_argument("--model", type=str, default="CNN3D",
-                help="Class name in models.py (e.g., CNN3D, UNet3D, ResNet50_3D, DenseNet121_3D...)")
+    parser.add_argument("--model", type=str, default="CNN3D", help="Class name in models.py (e.g., CNN3D, UNet3D, ResNet50_3D, DenseNet121_3D...)")
     parser.add_argument('--model_name_extra', type=str, default="IDEAS_Inten_Norm", help='Extra name to be used as the result folder name. E.g. parameters or others tests names')
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=get_device(), help='e.g., "cpu", "cuda", "cuda:0"')
+
+    # Input paths and data
+    parser.add_argument("--dataset", type=str, default="IDEAS", help="Dataset name, ADNI, IDEAS, or ADNI_CL (suffix to load demographics .csv)")
     parser.add_argument("--input_path", type=str, default='', help='images save in BIDS format. If not input, will set as <proj_path>/data') # Berkeley server ADNI data path: /home/jagust/xnat/squid/adni/
-    parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm')
+    parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm or SCANS (folder name of Berkeley server ADNI data)')
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
+    parser.add_argument("--image_shape", nargs=3, type=int, default=[128,128,128], help="Input image shape (x,y,z) after resampling, can be tuned by Optuna")
 
     # Model args
-    parser.add_argument("--model_kwargs", type=str, default="",
-                    help='JSON string of extra kwargs for the selected model (e.g., \'{"features": 32}\')')
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--model_kwargs", type=str, default="", help='JSON string of extra kwargs for the selected model (e.g., \'{"features": 32}\')')
     
     # Training
     parser.add_argument("--epochs", type=int, default=200) # true model should start with 30 
@@ -31,12 +37,11 @@ def parse_arguments():
     parser.add_argument("--num_workers", type=int, default=8) # 8 on the cluster, 2 on mac
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to load (optional)")
     parser.add_argument("--amp", action="store_true", help="Use automatic mixed precision if CUDA is available.")
-    
-    parser.add_argument("--seed", type=int, default=42)
+
+    # CV
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for StratifiedKFold.")
     parser.add_argument("--stratifycvby", default="visual_read,site", help=",site,tracer, List of column names to stratify by (e.g., visual_read CL age gender).")
-    parser.add_argument("--image_shape", nargs=3, type=int, default=[128,128,128])
-
+    
     # Hypertune - Optuna
     parser.add_argument("--tune", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--n_trials", type=int, default=60) #60
@@ -47,7 +52,6 @@ def parse_arguments():
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
     
     # Validation / Testing
-    parser.add_argument("--dataset", type=str, default="IDEAS", choices=['ADNI', 'IDEAS'], help="Dataset name, ADNI or IDEAS")
     parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_02221", help="Path to the folder that contains the best model checkpoint for external validation.")
     
     # Parse arguments and set up the output directory

@@ -61,7 +61,6 @@ def main(args):
 if __name__ == "__main__":
     args = parse_arguments()
     print(args)
-    args.device = get_device()
     #args.device = get_device(force_cpu=True)
     print("Using device:", args.device)
 
