@@ -52,7 +52,7 @@ def parse_arguments():
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
     
     # Validation / Testing
-    parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_02221", help="Path to the folder that contains the best model checkpoint for external validation.")
+    parser.add_argument("--best_model_folder", type=str, default="CNN3D_visual_read_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211", help="Path to the folder that contains the best model checkpoint for external validation.")
     
     # Parse arguments and set up the output directory
     args, unknown = parser.parse_known_args()
