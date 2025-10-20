@@ -10,7 +10,7 @@ Thumbs.db
 __pycache__/
 
 test.ipynb
-plot.ipynb
+#plot.ipynb
 slurm*
 *~
 jobgraph_overview*
