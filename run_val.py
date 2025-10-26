@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from src.params import parse_arguments
-from src.utils import build_model_from_args, get_device, set_seed
+from src.utils import build_model_from_args, get_device, set_seed, compute_smooth_sigma_vox
 from src.data import build_master_table, get_transforms, get_loader
 from src.train import evals, compute_metrics
 
@@ -26,7 +26,9 @@ def main(args):
             print('finding scans from folder')
             df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
             df.to_csv(os.path.join(args.proj_path, "data", f'{args.dataset}_found_scans_{args.data_suffix}_{args.targets}.csv'))
-        tfm = get_transforms()
+        
+        sigma_vox = compute_smooth_sigma_vox(args.voxel_sizes, fwhm_current_mm=6.0, fwhm_target_mm=10.0) if args.voxel_sizes else None # for ADNI SCANS
+        tfm = get_transforms(smooth_sigma_vox = sigma_vox)
     elif 'IDEAS' in args.dataset: # Berzelius, load torch tensors
         print('Validate on IDEAS test set...')
         test_set = os.path.join(args.best_model_folder,'Hold-out_testing-set.csv')

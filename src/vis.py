@@ -1,7 +1,11 @@
 import os
-import torch, nibabel as nib
+import torch
 import numpy as np
+import torch.nn as nn
+import nibabel as nib
+import torch.nn.functional as F
 from monai.visualize.occlusion_sensitivity import OcclusionSensitivity
+from monai.visualize.class_activation_maps import GradCAM
 
 from src.data import get_transforms
 
@@ -68,3 +72,62 @@ def group_occlusion_maps(model, paths, out_dir: str, *,
 
     nib.save(nib.Nifti1Image(mean_map, ref_affine), os.path.join(out_dir, "group_mean.nii.gz"))
     nib.save(nib.Nifti1Image(std_map,  ref_affine), os.path.join(out_dir, "group_std.nii.gz"))
+
+
+def grad_cam(model, x, # [1, C, D, H, W]
+             target_layer: str | None = None,      # auto-pick last Conv3d if None
+             class_idx: int | None = None,         # auto from model output if None
+             upsample_mode: str = "trilinear", align_corners: bool = False, 
+             normalize: bool = True) -> np.ndarray: # min-max to [0,1]
+    """
+    Compute Grad-CAM (or Grad-CAM++) for a 3D model that outputs logits.
+    Returns a NumPy array of shape (D, H, W).
+    """
+    assert x.ndim == 5 and x.size(0) == 1, "x must be a single 3D volume: [1, C, D, H, W]"
+    model.eval()
+
+    # --- pick target layer: last Conv3d if not provided
+    if target_layer is None:
+        last = None
+        for name, m in model.named_modules():
+            if isinstance(m, nn.Conv3d):
+                last = name
+        if last is None: raise ValueError("No Conv3d layer found; specify target_layer explicitly.")
+        target_layer = last
+    #print(f"Using target layer: {target_layer}")
+
+    # --- forward once to get logits and decide class_idx if needed
+    if class_idx is None:
+        with torch.inference_mode():
+            logits = model(x)  # expected shapes: [B,1] or [B,2] (or [B,C])
+        if logits.ndim == 1: logits = logits.unsqueeze(1)    # [B] -> make it [B,1]
+        n_classes = logits.shape[1]
+        class_idx = 0 if n_classes == 1 else int(torch.argmin(logits, dim=1).item())  # predicted class # argmin because the pos and neg flag is revert in trainnig
+    else: # sanity check
+        if not (0 <= int(class_idx) < n_classes):
+            raise ValueError(f"class_idx {class_idx} out of range 0..{n_classes-1}")
+    
+    cam = GradCAM(nn_module=model, target_layers=target_layer)
+    # --- compute CAM (disable AMP for stable grads)
+    with torch.amp.autocast(device_type="cuda", enabled=False):
+        cam_map = cam(x, class_idx=int(class_idx))   # [B, 1, d, h, w]
+    cam_map = cam_map.detach()
+
+    # --- upsample to input spatial size if needed
+    in_spatial = x.shape[-3:]
+    cam_spatial = cam_map.shape[-3:]
+    if cam_spatial != in_spatial:
+        print('Upsample to input space')
+        cam_map = F.interpolate(cam_map, size=in_spatial, mode=upsample_mode, align_corners=align_corners)
+
+    cam_np = cam_map[0, 0].cpu().float().numpy()  # (D, H, W)
+
+    # --- normalize to [0,1] if requested
+    if normalize:
+        vmin, vmax = np.nanmin(cam_np), np.nanmax(cam_np)
+        if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
+            cam_np = (cam_np - vmin) / (vmax - vmin)
+        else:
+            cam_np = np.zeros_like(cam_np, dtype=np.float32)
+
+    return cam_np, class_idx, logits.detach().cpu().numpy() # (D, H, W)

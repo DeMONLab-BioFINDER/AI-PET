@@ -8,7 +8,7 @@ from typing import List, Optional, Union
 from torch.utils.data import DataLoader, Dataset, Subset
 from monai.data import MetaTensor
 from monai.transforms import (LoadImage, EnsureChannelFirst, Orientation, Resize,
-        ScaleIntensityRangePercentiles, Compose, CropForeground)
+        ScaleIntensityRangePercentiles, Compose, CropForeground, GaussianSmooth)
 
 from src.utils import seed_worker
 # ------------------------------
@@ -216,7 +216,8 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
 
 
 def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: float = 99.0,
-    crop_foreground: bool = True, ras: bool = True, interp: str = "trilinear", out_range: tuple = (0.0, 1.0)):
+    crop_foreground: bool = True, ras: bool = True, interp: str = "trilinear", out_range: tuple = (0.0, 1.0),
+    smooth_sigma_vox: tuple | None = None,):
     """
     Build a preprocessing pipeline for PET volumes using MONAI.
     
@@ -234,7 +235,8 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
         Interpolation mode for resizing (e.g., 'trilinear').
     out_range : tuple
         Output intensity range (min, max).
-    
+    smooth_sigma_vox: tuple
+        mm-based smoothing → computed for *original* voxels)
     Returns
     -------
     monai.transforms.Compose
@@ -244,6 +246,8 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
              EnsureChannelFirst()] # adds a channel dimension: (D, H, W) → (C=1, D, H, W)
     if ras:
         steps.append(Orientation(axcodes="RAS", labels=None)) # Reorients the image to a standard anatomical orientation: Right–Anterior–Superior
+    if smooth_sigma_vox is not None:
+        steps.append(GaussianSmooth(sigma=smooth_sigma_vox))
     if crop_foreground: # Removes empty background by finding the smallest bounding box around the “non-zero” region
         steps.append(CropForeground())
     steps.append(Resize(spatial_size=target_shape, mode=interp)) # Resamples to the target size

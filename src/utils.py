@@ -66,6 +66,20 @@ def get_device(prefer_cuda=True, force_cpu=False):
     torch.backends.cudnn.benchmark = True  # 3D convs benefit
     return torch.device("cpu")
 
+
+def compute_smooth_sigma_vox(voxel_sizes_mm: tuple[float, float, float], fwhm_current_mm: float, fwhm_target_mm: float) -> tuple[float, float, float] | None:
+    """
+    Returns per-axis sigma in *voxels* for MONAI.GaussianSmooth to top-up smoothing
+    from fwhm_current_mm to fwhm_target_mm. If no extra smoothing needed, returns (0,0,0).
+    """
+    if fwhm_target_mm <= fwhm_current_mm:
+        return (0.0, 0.0, 0.0)
+
+    fwhm_extra_mm = np.sqrt(fwhm_target_mm**2 - fwhm_current_mm**2)  # quadrature
+    sigma_mm = fwhm_extra_mm / 2.354820045  # mm → σ
+    vx, vy, vz = voxel_sizes_mm
+    return (sigma_mm / vx, sigma_mm / vy, sigma_mm / vz)
+
 def append_metrics_row(csv_path: str, row: dict):
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     write_header = not os.path.exists(csv_path)

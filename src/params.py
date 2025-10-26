@@ -20,7 +20,7 @@ def parse_arguments():
     parser.add_argument("--dataset", type=str, default="IDEAS", help="Dataset name, ADNI, IDEAS, or ADNI_CL (suffix to load demographics .csv)")
     parser.add_argument("--input_path", type=str, default='', help='images save in BIDS format. If not input, will set as <proj_path>/data') # Berkeley server ADNI data path: /home/jagust/xnat/squid/adni/
     parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm or SCANS (folder name of Berkeley server ADNI data)')
-    parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
+    parser.add_argument("--targets", type=str, default="CL", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
     parser.add_argument("--image_shape", nargs=3, type=int, default=[128,128,128], help="Input image shape (x,y,z) after resampling, can be tuned by Optuna")
 
     # Model args
@@ -52,7 +52,8 @@ def parse_arguments():
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
     
     # Validation / Testing
-    parser.add_argument("--best_model_folder", type=str, default="CNN3D_visual_read_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211", help="Path to the folder that contains the best model checkpoint for external validation.")
+    parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211", help="Path to the folder that contains the best model checkpoint for external validation.")
+    parser.add_argument("--voxel_sizes", type=lambda s: tuple(float(x) for x in s.split(",")), default=None, help="input image voxel sizes in mm as comma-separated values for smoothing, e.g. 2.0,2.0,2.0")
     
     # Parse arguments and set up the output directory
     args, unknown = parser.parse_known_args()
