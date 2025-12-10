@@ -2,71 +2,69 @@ from src.warnings import ignore_warnings
 ignore_warnings()
 
 import os
-import torch
 import numpy as np
 import pandas as pd
 
 from src.params import parse_arguments
-from src.utils import build_model_from_args, get_device, set_seed, compute_smooth_sigma_vox
-from src.data import build_master_table, get_transforms, get_loader
+from src.utils import get_device, set_seed
+from src.data import  get_loader
 from src.train import evals, compute_metrics
+from src.validation import load_validation_data, load_preatrained_model, finetune, freeze_all_but_last_k
 
 import torch.multiprocessing as mp
 os.environ["NIBABEL_KEEP_FILE_OPEN"] = "0"
 mp.set_sharing_strategy("file_system")
 
 def main(args):
-    if 'ADNI' in args.dataset: # Berkeley server, load NIfTI files
-        print('Validate on ADNI test set...')
-        test_set = os.path.join(args.proj_path, "data", f'{args.dataset}_found_scans_{args.data_suffix}_{args.targets}.csv')
-        if os.path.exists(test_set):
-            print('loading validation dataframe')
-            df = pd.read_csv(test_set, index_col=0)
-        else:
-            print('finding scans from folder')
-            df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
-            df.to_csv(os.path.join(args.proj_path, "data", f'{args.dataset}_found_scans_{args.data_suffix}_{args.targets}.csv'))
-        
-        sigma_vox = compute_smooth_sigma_vox(args.voxel_sizes, fwhm_current_mm=6.0, fwhm_target_mm=10.0) if args.voxel_sizes else None # for ADNI SCANS
-        tfm = get_transforms(smooth_sigma_vox = sigma_vox)
-    elif 'IDEAS' in args.dataset: # Berzelius, load torch tensors
-        print('Validate on IDEAS test set...')
-        test_set = os.path.join(args.best_model_folder,'Hold-out_testing-set.csv')
-        print(test_set)
-        df = pd.read_csv(test_set, index_col=0)
-        tfm = args.input_path
+    # Load Validation Dataset
+    tfm, dl_va, df = load_validation_data(args)
+    # Load Pretrained Model
+    model, targets_list = load_preatrained_model(args, df)
     
-    dl_va = get_loader(df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
-    
-    targets_list = [t.strip() for t in args.targets.split(",") if t.strip()]
-    n_classes = int(df["visual_read"].dropna().nunique()) if 'visual_read' in targets_list else None
-    model = build_model_from_args(args, device=args.device, n_classes=n_classes)
-    sd = torch.load(os.path.join(args.best_model_folder, 'outer-test/checkpoints', 'best.pt'), map_location=args.device, weights_only=True)
-    state_dict = sd.get("model", sd) if isinstance(sd, dict) else sd
-    model.load_state_dict(state_dict, strict=False)
-    
+    # FEW-SHOT FINETUNING 
+    if args.few_shot_csv is not None:
+        print("\n========== FEW-SHOT FINETUNING MODE ==========\n")
+        # Load few-shot dataset
+        df_fs = pd.read_csv(args.few_shot_csv)
+        dl_fs_tr = get_loader(df_fs, tfm, args, augment=True, shuffle=True)
+        dl_fs_va = get_loader(df_fs, tfm, args, augment=False, shuffle=False)
+
+        # Freeze except last K layers
+        model = freeze_all_but_last_k(model, args.unfreeze_layers)
+        # Fine-tune
+        model = finetune(model, dl_fs_tr, dl_fs_va, args, epochs=args.finetune_epochs)
+        print("\n========== FEW-SHOT FINETUNING COMPLETE ==========\n")
+
+    # FINAL VALIDATION
     probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, dl_va, args.device)
     if 'visual_read' in targets_list:
         df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 'pred':np.concatenate(preds, axis=0), 'prob':np.concatenate(probs, axis=0)})
     elif 'CL' in targets_list:
         df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0), 'pred':np.concatenate(cents, axis=0)})
-    df_result.to_csv(os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}.csv'))
+    
+    out_csv = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}.csv')
+    df_result.to_csv(out_csv)
+    print(f"Saved predictions → {out_csv}")
 
     metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
-    print(metrics)
-
+    print("\nFINAL METRICS:", metrics)
     print('DONE!')
-
-    return 
 
 
 if __name__ == "__main__":
     args = parse_arguments()
     #args.device = get_device()
     args.device = get_device(force_cpu=True)
-    print("Using device:", args.device)
     print(args)
-
     set_seed(args.seed)
+
+    print("\n========== VALIDATION SUMMARY ==========")
+    print(f"best_model_folder : {args.best_model_folder}")
+    print(f"voxel_sizes       : {args.voxel_sizes}")
+    print(f"few_shot_csv      : {args.few_shot_csv}")
+    print(f"unfreeze_layers   : {args.unfreeze_layers}")
+    print(f"finetune_epochs   : {args.finetune_epochs}")
+    print(f"device            : {args.device}")
+    print("===========================================\n")
 
     main(args)

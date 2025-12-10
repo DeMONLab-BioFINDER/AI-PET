@@ -54,6 +54,9 @@ def parse_arguments():
     # Validation / Testing
     parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211", help="Path to the folder that contains the best model checkpoint for external validation.")
     parser.add_argument("--voxel_sizes", type=lambda s: tuple(float(x) for x in s.split(",")), default=None, help="input image voxel sizes in mm as comma-separated values for smoothing, e.g. 2.0,2.0,2.0")
+    parser.add_argument("--few_shot_csv", type=str, default=None, help="Path to CSV file for few-shot finetuning (optional). columns must include pet_path + target label. If None, no fine-tuning is performed.")
+    parser.add_argument("--unfreeze_layers", type=int, default=2, help="Number of last layers to unfreeze during few-shot finetuning. (e.g., 1 = final linear layer; 2 = dropout + linear).")
+    parser.add_argument("--finetune_epochs", type=int, default=10, help="Number of epochs for few-shot finetuning.")
     
     # Parse arguments and set up the output directory
     args, unknown = parser.parse_known_args()

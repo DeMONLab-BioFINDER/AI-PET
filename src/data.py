@@ -8,7 +8,8 @@ from typing import List, Optional, Union
 from torch.utils.data import DataLoader, Dataset, Subset
 from monai.data import MetaTensor
 from monai.transforms import (LoadImage, EnsureChannelFirst, Orientation, Resize,
-        ScaleIntensityRangePercentiles, Compose, CropForeground, GaussianSmooth)
+        ScaleIntensityRangePercentiles, Compose, CropForeground, GaussianSmooth,
+        KeepLargestConnectedComponent)
 
 from src.utils import seed_worker
 # ------------------------------
@@ -217,9 +218,18 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
 
 def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: float = 99.0,
     crop_foreground: bool = True, ras: bool = True, interp: str = "trilinear", out_range: tuple = (0.0, 1.0),
-    smooth_sigma_vox: tuple | None = None,):
+    smooth_sigma_vox: tuple | None = None, apply_brain_mask: bool = True,):
     """
-    Build a preprocessing pipeline for PET volumes using MONAI.
+    PET-optimized preprocessing pipeline using MONAI.
+
+    Steps (in correct PET order):
+    1) Load + channel first
+    2) Reorient to RAS
+    3) Optional Gaussian smoothing (helps SNR)
+    4) CropForeground (removes large empty areas)
+    5) Resize to fixed shape
+    6) Percentile intensity normalization
+    7) Optional LargestConnectedComponent to keep only brain mask
     
     Parameters
     ----------
@@ -244,20 +254,20 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
     """
     steps = [LoadImage(image_only=True),
              EnsureChannelFirst()] # adds a channel dimension: (D, H, W) → (C=1, D, H, W)
-    if ras:
-        steps.append(Orientation(axcodes="RAS", labels=None)) # Reorients the image to a standard anatomical orientation: Right–Anterior–Superior
-    if smooth_sigma_vox is not None:
+    if ras: steps.append(Orientation(axcodes="RAS", labels=None)) # Reorients the image to a standard anatomical orientation: Right–Anterior–Superior
+    
+    if smooth_sigma_vox is not None: # Smooth BEFORE crop/resize (improves SNR for bounding box & interpolation)
         steps.append(GaussianSmooth(sigma=smooth_sigma_vox))
-    if crop_foreground: # Removes empty background by finding the smallest bounding box around the “non-zero” region
-        steps.append(CropForeground())
+
+    if crop_foreground: steps.append(CropForeground()) # Crop out huge empty regions
     steps.append(Resize(spatial_size=target_shape, mode=interp)) # Resamples to the target size
     # Intensity normalization: maps voxel values between the 1st–99th percentile to [0,1] (clipping outliers)
-    # Produces stable input scale across subjects
-    steps.append(ScaleIntensityRangePercentiles(
-        lower=pct_lo, upper=pct_hi,
-        b_min=float(out_range[0]), b_max=float(out_range[1]),
-        clip=True,
-        ))
+    steps.append(ScaleIntensityRangePercentiles(lower=pct_lo, upper=pct_hi, b_min=float(out_range[0]), b_max=float(out_range[1]), clip=True))
+
+    # ---- Force background = 0 (critical for model to focus on brain) ----
+    if apply_brain_mask:
+        steps.append(KeepLargestConnectedComponent(applied_labels=[1])) # Keep only largest connected component (clean brain mask)
+    
     return Compose(steps)
 
 
