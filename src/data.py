@@ -2,14 +2,16 @@
 import os
 import re
 import torch
+import numpy as np
 import pandas as pd
+import scipy.ndimage as ndi
 from pathlib import Path
 from typing import List, Optional, Union
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 from monai.data import MetaTensor
 from monai.transforms import (LoadImage, EnsureChannelFirst, Orientation, Resize,
         ScaleIntensityRangePercentiles, Compose, CropForeground, GaussianSmooth,
-        KeepLargestConnectedComponent)
+        Lambda)
 
 from src.utils import seed_worker
 # ------------------------------
@@ -183,7 +185,6 @@ def load_participants_labels(input_path: str, dataset: Optional[str] = None) -> 
 # Transforms & Dataset
 # ------------------------------
 def get_train_val_loaders(train_df, val_df, args):
-
     # Detect cached mode
     use_cache = (not args.data_suffix) or (str(args.data_suffix).strip() == "")
     if use_cache:
@@ -216,21 +217,36 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
     return loader
 
 
+def brain_outer_mask(x):
+    """
+    Returns mask of same shape: 1 inside brain, 0 outside.
+    """
+    vol = x.squeeze().cpu().numpy()
+
+    # Simple foreground threshold (very safe)
+    thr = vol.mean() * 0.2
+    init_mask = vol > thr
+
+    # Largest connected component (outer boundary)
+    lbl, n = ndi.label(init_mask) # label connected components, lbl=labels, n=number of components, by default 4-connectivity for 2D, 6-connectivity for 3D
+    if n < 1: return torch.ones_like(x)  # fallback: no masking
+
+    largest = (lbl == np.argmax(np.bincount(lbl.flat)[1:]) + 1) # boolean array [D, H, W], largest connected component
+
+    # Fill interior holes (this is the fix!)
+    filled = ndi.binary_fill_holes(largest) # fill holes in binary object, 6-connectivity for 3D
+    # erode the mask → removes skull!
+    # eroded = ndi.binary_erosion(filled, iterations=2)  # 1–2 voxels is ideal, shrinks the forefround region (1s) by one layer of voxels for each iteration
+
+    mask = torch.from_numpy(filled).float().unsqueeze(0)
+    return mask.to(x.device)
+
 def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: float = 99.0,
     crop_foreground: bool = True, ras: bool = True, interp: str = "trilinear", out_range: tuple = (0.0, 1.0),
     smooth_sigma_vox: tuple | None = None, apply_brain_mask: bool = True,):
     """
     PET-optimized preprocessing pipeline using MONAI.
 
-    Steps (in correct PET order):
-    1) Load + channel first
-    2) Reorient to RAS
-    3) Optional Gaussian smoothing (helps SNR)
-    4) CropForeground (removes large empty areas)
-    5) Resize to fixed shape
-    6) Percentile intensity normalization
-    7) Optional LargestConnectedComponent to keep only brain mask
-    
     Parameters
     ----------
     target_shape : tuple of int
@@ -247,6 +263,8 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
         Output intensity range (min, max).
     smooth_sigma_vox: tuple
         mm-based smoothing → computed for *original* voxels)
+    apply_brain_mask : bool
+        Whether to apply a brain mask to zero out non-brain regions.
     Returns
     -------
     monai.transforms.Compose
@@ -266,7 +284,7 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
 
     # ---- Force background = 0 (critical for model to focus on brain) ----
     if apply_brain_mask:
-        steps.append(KeepLargestConnectedComponent(applied_labels=[1])) # Keep only largest connected component (clean brain mask)
+        steps.append(Lambda(lambda x: x * brain_outer_mask(x))) # apply brain mask by threshold
     
     return Compose(steps)
 
