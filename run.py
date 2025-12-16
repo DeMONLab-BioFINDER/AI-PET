@@ -39,7 +39,7 @@ def main(args):
         print(best_args_fixed)
 
         print("\nRetraining on FULL TRAIN pool with fixed epochs (no early stop), then one-shot TEST eval…")
-        final_metrics = run_fold(df_train, df_test, best_args_fixed, fold_name="outer-test",
+        final_metrics = run_fold(df_train, df_test, best_args_fixed, fold_name="nestedcv-outer-test",
             use_early_stop=False, use_scheduler=False, final_retrain=True)
 
         print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
@@ -51,7 +51,7 @@ def main(args):
         # --- Direct CV (no tuning) on train_pool to gauge stability ---
         # kfold_cv(df_train, stratify_labels_train, args)
         # 2 split only: single final train vs test
-        final_metrics = run_fold(df_train, df_test, args, fold_name="outer-test")
+        final_metrics = run_fold(df_train, df_test, args, fold_name="train-test-split")
         print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
               f"ACC={final_metrics.get('acc'):.3f} MAE={final_metrics.get('mae'):.2f} "
               f"RMSE={final_metrics.get('rmse'):.2f} R2={final_metrics.get('r2'):.3f}")

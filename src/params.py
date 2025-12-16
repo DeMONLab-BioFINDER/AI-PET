@@ -37,7 +37,9 @@ def parse_arguments():
     parser.add_argument("--loss_w_reg", type=float, default=1.0)
     parser.add_argument("--num_workers", type=int, default=8) # 8 on the cluster, 2 on mac
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to load (optional)")
-    parser.add_argument("--amp", action="store_true", help="Use automatic mixed precision if CUDA is available.")
+    parser.add_argument("--amp", type=bool, default=True, help="Use automatic mixed precision if CUDA is available.")
+    parser.add_argument("--es_patience", type=int, default=10, help="Early stopping patience.")
+    parser.add_argument("--es_min_delta", type=float, default=1e-2, help="Early stopping minimum delta.")
 
     # CV
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for StratifiedKFold.")
@@ -55,9 +57,9 @@ def parse_arguments():
     # Validation / Testing
     parser.add_argument("--best_model_folder", type=str, default=None, help="Path to the folder that contains the best model checkpoint for external validation.") #CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211
     parser.add_argument("--voxel_sizes", type=lambda s: tuple(float(x) for x in s.split(",")), default=None, help="input image voxel sizes in mm as comma-separated values for smoothing, e.g. 2.0,2.0,2.0")
-    parser.add_argument("--few_shot_csv", type=str, default=None, help="Path to CSV file for few-shot finetuning (optional). columns must include pet_path + target label. If None, no fine-tuning is performed.")
-    parser.add_argument("--unfreeze_layers", type=int, default=2, help="Number of last layers to unfreeze during few-shot finetuning. (e.g., 1 = final linear layer; 2 = dropout + linear).")
-    parser.add_argument("--finetune_epochs", type=int, default=10, help="Number of epochs for few-shot finetuning.")
+    parser.add_argument("--few_shot", type=int, default=0, help="Number of few-shot samples to use for fine-tuning.")
+    parser.add_argument("--few_shot_iterations", type=int, default=100, help="Number of few-shot iterations to run.")
+    parser.add_argument("--unfreeze_layers", type=int, default=1, help="Number of last layers to unfreeze during few-shot finetuning. (e.g., 1 = final linear layer; 2 = dropout + linear).")
     
     # Visualization
     parser.add_argument("--visualization_name", type=str, default='gradcam', help="Interpretation method. e.g. 'gradcam' or 'occlusion'")

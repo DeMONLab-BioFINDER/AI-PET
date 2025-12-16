@@ -8,8 +8,7 @@ import pandas as pd
 from src.params import parse_arguments
 from src.utils import get_device, set_seed
 from src.data import  get_loader
-from src.train import evals, compute_metrics
-from src.validation import load_validation_data, load_preatrained_model, finetune, freeze_all_but_last_k
+from src.validation import load_validation_data, load_preatrained_model, run_few_shots, inference
 
 import torch.multiprocessing as mp
 os.environ["NIBABEL_KEEP_FILE_OPEN"] = "0"
@@ -22,32 +21,28 @@ def main(args):
     model, targets_list = load_preatrained_model(args, df)
     
     # FEW-SHOT FINETUNING 
-    if args.few_shot_csv is not None:
+    if args.few_shot > 0:
         print("\n========== FEW-SHOT FINETUNING MODE ==========\n")
-        # Load few-shot dataset
-        df_fs = pd.read_csv(args.few_shot_csv)
-        dl_fs_tr = get_loader(df_fs, tfm, args, augment=True, shuffle=True)
-        dl_fs_va = get_loader(df_fs, tfm, args, augment=False, shuffle=False)
-
-        # Freeze except last K layers
-        model = freeze_all_but_last_k(model, args.unfreeze_layers)
-        # Fine-tune
-        model = finetune(model, dl_fs_tr, dl_fs_va, args, epochs=args.finetune_epochs)
+        df_metrics, df_results, df_ids = run_few_shots(args, df, tfm, model, targets_list)
+        print("metrics:")
+        print(df_metrics.describe())
+        out_csv_prefix = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}_fewshot-{args.few_shot}_iter-{args.few_shot_iterations}')
+        df_ids.to_csv(f"{out_csv_prefix}_subject_ids.csv", index=False)
         print("\n========== FEW-SHOT FINETUNING COMPLETE ==========\n")
+    else:
+        print("\n========== ZERO-SHOT MODE ==========\n")
+        dl_eval = get_loader(df, tfm, args, shuffle=False, drop_last=False)
+        metrics, df_results = inference(model, dl_eval, targets_list, args.device)
+        print("metrics:", metrics)
+        df_metrics = pd.DataFrame([metrics])
+        out_csv_prefix = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}_zeroshot')
+        print("\n========== ZERO-SHOT COMPLETE ==========\n")
 
-    # FINAL VALIDATION
-    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, dl_va, args.device)
-    if 'visual_read' in targets_list:
-        df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 'pred':np.concatenate(preds, axis=0), 'prob':np.concatenate(probs, axis=0)})
-    elif 'CL' in targets_list:
-        df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0), 'pred':np.concatenate(cents, axis=0)})
-    
-    out_csv = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}.csv')
-    df_result.to_csv(out_csv)
-    print(f"Saved predictions → {out_csv}")
+    # Save Results
+    df_results.to_csv(f'{out_csv_prefix}_results.csv', index=False)
+    df_metrics.to_csv(f'{out_csv_prefix}_metrics.csv', index=False)
+    print(f"Saved predictions → {out_csv_prefix}")
 
-    metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
-    print("\nFINAL METRICS:", metrics)
     print('DONE!')
 
 
@@ -61,7 +56,7 @@ if __name__ == "__main__":
     print("\n========== VALIDATION SUMMARY ==========")
     print(f"best_model_folder : {args.best_model_folder}")
     print(f"voxel_sizes       : {args.voxel_sizes}")
-    print(f"few_shot_csv      : {args.few_shot_csv}")
+    print(f"few_shot          : {args.few_shot}")
     print(f"unfreeze_layers   : {args.unfreeze_layers}")
     print(f"finetune_epochs   : {args.finetune_epochs}")
     print(f"device            : {args.device}")

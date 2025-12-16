@@ -11,7 +11,7 @@ from src.data import get_train_val_loaders
 from src.early_stopping import EarlyStopper
 from src.train import train_one_epoch, eval_epoch
 from src.vis import run_visualization
-from src.utils import append_metrics_row, save_checkpoint, build_model_from_args, append_epoch_metrics_csv, plot_metrics_from_csv, save_train_test_subjects
+from src.utils import append_metrics_row, save_checkpoint, build_model_from_args, load_best_checkpoint, append_epoch_metrics_csv, plot_metrics_from_csv, save_train_test_subjects
 
 
 def kfold_cv(df_clean, stratify_labels, args):
@@ -40,9 +40,7 @@ def kfold_cv(df_clean, stratify_labels, args):
     print(f"\nDone. Metrics saved to: {metrics_path}")
 
 
-def run_fold(train_df, val_df, args, fold_name: str, *, 
-             use_early_stop: bool = True, es_patience=10, es_min_delta=1e-2,
-             use_scheduler: bool = True, final_retrain: bool = False, on_epoch_end=None):
+def run_fold(train_df, val_df, args, fold_name: str, *, on_epoch_end=None):
     """
     Train and return metrics dict.
     Modes:
@@ -50,7 +48,8 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
       - Final retrain (Option A): final_retrain=True  => fixed epochs, no early stop/scheduler;
         then evaluate once on val_df (outer test). No leakage.
     """
-    fold_dir, ckpt_dir, viz_dir = _make_outfolder_fold(args.output_path, fold_name)
+    nestedcv_outer_test = (fold_name == "nestedcv-outer-test")
+    fold_dir, path_list = _make_outfolder_fold(args.output_path, fold_name) # path_list: csv_path, csv_loss_path, ckpt_path
     save_train_test_subjects(train_df, val_df, fold_dir, fold_name)
 
     dl_tr, dl_va = get_train_val_loaders(train_df, val_df, args)
@@ -61,118 +60,92 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
 
     model = build_model_from_args(args, device=args.device, n_classes=n_classes)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    sched = (ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) if not nestedcv_outer_test else None) # NOT using Scheduler in final retrain
+
+    model, best_epoch = train_model(model, dl_tr, dl_va, args=args, optimizer=opt, scheduler=sched, fold_name=fold_name,
+                                    path_list=path_list, on_epoch_end=on_epoch_end)
+
+    # ---- Load best checkpoint (CV mode) ----
+    if not nestedcv_outer_test: # In final retrain, there is no val-based checkpoint; use LAST-EPOCH weights
+        model = load_best_checkpoint(model, ckpt_path=path_list[2], device=args.device)
+
+    metrics = eval_epoch(model, dl_va, args.device)
+    metrics["best_epoch"] = int(best_epoch)
+
+    # Visualization
+    plot_metrics_from_csv(path_list[0], os.path.join(fold_dir, "metrics.png"))
+    run_visualization(model, dl_va, args.device, args.output_path, vis_name=args.visualization_name) # the best model on validation set, save .png and .nii
+
+    return metrics
+
+
+def train_model(model, dl_tr, dl_va, *, args, optimizer, scheduler, fold_name, path_list, on_epoch_end=None):
+    """
+    Unified training loop.
+    """
+    assert len(path_list) == 3, f"Expected 3 paths, got {len(path_list)}"
+    csv_path, csv_loss_path, ckpt_path = path_list
+    nestedcv_outer_test = (fold_name == "nestedcv-outer-test")
+
     scaler = torch.cuda.amp.GradScaler() if args.amp and torch.cuda.is_available() else None
+    es = EarlyStopper(patience=args.es_patience, min_delta=args.es_min_delta) if  not nestedcv_outer_test else None
 
-    if use_scheduler and not final_retrain: # Scheduler only for CV mode (not in final retrain)
-        sched = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) # scheduler (maximize AUC+ACC)
-    else:
-        sched = None
-
-    # Early stopper only for CV mode
-    es = EarlyStopper(patience=es_patience, min_delta=es_min_delta) if use_early_stop and not final_retrain else None
-
-    csv_path = os.path.join(fold_dir, "metrics_per_epoch.csv")
-    csv_loss_path = os.path.join(fold_dir, "trainning_loss_per_epoch.csv")
-
-    # --- Training loop ---
-    best_epoch = 0  # track for CV
+    best_epoch = 0
     epoch_bar = tqdm(range(1, args.epochs + 1), desc=f"{fold_name} epochs", position=1, leave=False, dynamic_ncols=True)
     for epoch in epoch_bar:
-        tr_loss, tr_loss_all = train_one_epoch(model, dl_tr, opt, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
-        
-        # In final retrain mode: do NOT evaluate on dl_va each epoch (no leakage)
-        if final_retrain:
-            # Log training loss only
+        tr_loss, tr_loss_all = train_one_epoch(model, dl_tr, optimizer, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
+
+        # ---- FINAL RETRAIN MODE (NO VAL) ----
+        if nestedcv_outer_test:
             epoch_bar.set_postfix(train_loss=f"{tr_loss:.4f}")
             append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
             continue
 
-        # CV mode: evaluate each epoch on validation    
+        # ---- CV MODE: VALIDATE ----
         metrics = eval_epoch(model, dl_va, args.device)
+        val_metric = metrics.get("val_metric", float("nan"))
 
-        # Keep the tqdm bar neat
-        epoch_bar.set_postfix(
-            train_loss=f"{tr_loss:.4f}",
-            AUC=f"{metrics.get('auc', float('nan')):.3f}",
-            ACC=f"{metrics.get('acc', float('nan')):.3f}",
-            MAE=f"{metrics.get('mae', float('nan')):.2f}",
-            RMSE=f"{metrics.get('rmse', float('nan')):.2f}",
-            R2=f"{metrics.get('r2', float('nan')):.3f}",
-            val_metric=f"{metrics.get('val_metric', float('nan')):.3f}"
-        )
+        # ---- tqdm postfix ----
+        epoch_bar.set_postfix(train_loss=f"{tr_loss:.4f}",
+                              AUC=f"{metrics.get('auc', float('nan')):.3f}", ACC=f"{metrics.get('acc', float('nan')):.3f}",
+                              MAE=f"{metrics.get('mae', float('nan')):.2f}", RMSE=f"{metrics.get('rmse', float('nan')):.2f}",
+                              R2=f"{metrics.get('r2', float('nan')):.3f}", val_metric=f"{val_metric:.3f}")
 
-        # scheduler on val_metric (CV mode only)
-        val_metric = metrics.get('val_metric', float('nan'))
-        if sched is not None and np.isfinite(val_metric): sched.step(val_metric)
+        if scheduler is not None and np.isfinite(val_metric): scheduler.step(val_metric)
 
-        # report to Optuna if callback provided
+        # ---- Optuna report, if callback provided ----
         if on_epoch_end is not None: on_epoch_end(int(fold_name.split('-k')[-1]) if 'trial' in fold_name else 0, epoch, val_metric)
 
-        # append epoch metrics to CSV
+        # ---- CSV logging ----
         append_epoch_metrics_csv(csv_path, epoch, {**metrics, "train_loss": tr_loss})
         append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
 
-        # early stopping / checkpoint ONLY on improvement
+        # ---- Early stopping + checkpoint ----
         if es is not None:
             stop, improved = es.step(val_metric, epoch)
             if improved:
                 best_epoch = es.best_epoch
-                save_checkpoint(model, os.path.join(ckpt_dir, "best.pt"))
+                save_checkpoint(model, ckpt_path)
             if stop:
-                tqdm.write(f"[{fold_name}] Early stopping at epoch {epoch} "
-                           f"(no improvement > {es_min_delta} for {es_patience} epochs).")
+                tqdm.write(
+                    f"[{fold_name}] Early stopping at epoch {epoch} "
+                    f"(no improvement > {args.es_min_delta} for {args.es_patience} epochs)."
+                )
                 break
 
-    # ===== End of epoch loop =====
-    # Finalize weights to evaluate:
-    if final_retrain: # In final retrain, there is no val-based checkpoint; use LAST-EPOCH weights
-        pass
-    else: # In CV mode, load the best val checkpoint if it exists; else use last weights
-        best_path = os.path.join(ckpt_dir, "best.pt")
-        if os.path.exists(best_path):
-            try:
-                sd = torch.load(best_path, map_location=args.device, weights_only=True)
-            except TypeError:
-                sd = torch.load(best_path, map_location=args.device)
-            state_dict = sd.get("model", sd) if isinstance(sd, dict) else sd
-            model.load_state_dict(state_dict, strict=False)
-    
-    # Visuals: only in CV mode and only using validation loader
-    if not final_retrain:
-        # metrics to return (CV)
-        last_metrics = eval_epoch(model, dl_va, args.device)
-        final_metrics = last_metrics
-        final_metrics["best_epoch"] = int(best_epoch)
-        plot_metrics_from_csv(csv_path, os.path.join(fold_dir, "metrics.png"))
-        tqdm.write(f"[{fold_name}] AUC={final_metrics.get('auc', float('nan')):.3f} "
-                f"ACC={final_metrics.get('acc', float('nan')):.3f} "
-                f"MAE={final_metrics.get('mae', float('nan')):.2f} "
-                f"RMSE={final_metrics.get('rmse', float('nan')):.2f} "
-                f"R2={final_metrics.get('r2', float('nan')):.3f} "
-                f"val_metric={final_metrics.get('val_metric', float('nan')):.3f}")
-        
-        # Visualization for the best model on validation set, save .png and .nii
-        run_visualization(model, dl_va, args.device, args.output_path, vis_name=args.visualization_name)
-        
-        return final_metrics
-
-    # Final retrain mode: evaluate ONCE on dl_va (which you pass as OUTER TEST)
-    test_metrics = eval_epoch(model, dl_va, args.device)
-    tqdm.write(f"[{fold_name}] TEST AUC={test_metrics.get('auc', float('nan')):.3f} "
-               f"ACC={test_metrics.get('acc', float('nan')):.3f} "
-               f"MAE={test_metrics.get('mae', float('nan')):.2f} "
-               f"RMSE={test_metrics.get('rmse', float('nan')):.2f} "
-               f"R2={test_metrics.get('r2', float('nan')):.3f}")
-    return test_metrics
+    return model, best_epoch
 
 
 def _make_outfolder_fold(output_path, fold_name):
     fold_dir = os.path.join(output_path, fold_name)
     ckpt_dir = os.path.join(fold_dir, "checkpoints")
-    viz_dir  = os.path.join(fold_dir, "viz")
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    return fold_dir, ckpt_dir, viz_dir
+    csv_path = os.path.join(fold_dir, "metrics_per_epoch.csv")
+    csv_loss_path = os.path.join(fold_dir, "trainning_loss_per_epoch.csv")
+    path_list = [csv_path, csv_loss_path, os.path.join(ckpt_dir, f"{fold_name}_best.pt")]
+
+    return fold_dir, path_list
 
 
 def get_stratify_labels(df: pd.DataFrame, cols):
@@ -201,8 +174,7 @@ def cv_median_best_epoch(df_train, stratify_labels_train, args) -> int:
         fold_name = f"kfold-{i}"
         tr_df = df_train.iloc[tr_idx].reset_index(drop=True)
         va_df = df_train.iloc[va_idx].reset_index(drop=True)
-        m = run_fold(tr_df, va_df, args, fold_name=fold_name,
-                     use_early_stop=True, use_scheduler=True, final_retrain=False)
+        m = run_fold(tr_df, va_df, args, fold_name=fold_name)
         be = int(m.get("best_epoch", 0))
         if be > 0:
             best_epochs.append(be)

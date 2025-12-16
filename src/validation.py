@@ -1,18 +1,116 @@
 # finetune.py
+from scripts.src.cv import run_fold
 from src.warnings import ignore_warnings
 ignore_warnings()
 
 import os
+import copy
 import torch
+import numpy as np
 import pandas as pd
+import torch.nn as nn
+from sklearn.model_selection import StratifiedShuffleSplit
 
 from src.data import build_master_table, get_transforms, get_loader
-from src.train import train_one_epoch, evals, compute_metrics
-from src.utils import compute_smooth_sigma_vox, build_model_from_args
+from src.train import train_model, evals, compute_metrics
+from src.utils import compute_smooth_sigma_vox, build_model_from_args, load_best_checkpoint
 
 import torch.multiprocessing as mp
 os.environ["NIBABEL_KEEP_FILE_OPEN"] = "0"
 mp.set_sharing_strategy("file_system")
+
+
+def run_few_shots(args, df, tfm, base_model, targets_list):
+    finetune_path = os.path.join(args.output_path, f"fewshot-{args.few_shot}")
+    os.makedirs(finetune_path, exist_ok=True)
+
+    all_metrics, all_fs_ids = [], [] 
+    df_results = pd.DataFrame([])
+    for it in range(args.few_shot_iterations):
+        print(f"\n=== Few-shot iteration {it+1}/{args.few_shot_iterations} ===")
+
+        seed_it = args.seed + it
+
+        # ----- stratification -----
+        if "visual_read" in targets_list:
+            strat_col = "visual_read"
+            df_use = df
+        else:
+            df_use = add_quantile_bins(df, "CL")
+            strat_col = "_qbin"
+
+        # ----- split -----
+        df_fs, df_eval = stratified_few_shot_split(df_use, n_shot=args.few_shot, stratify_col=strat_col, seed=seed_it)
+        all_fs_ids.append({"iteration": it, "ids": df_fs["ID"].tolist()})
+        df_ids = pd.DataFrame(all_fs_ids)
+
+        # ----- FEW-SHOT -----
+        metrics, df_result = few_shots(base_model, df_fs, df_eval, tfm, args, it)
+        print("metrics:", metrics)
+
+        # ----- COLLECT -----
+        metrics["iteration"] = it
+        all_metrics.append(metrics)
+        df_result["iteration"] = it
+        df_results = pd.concat([df_results, df_result], ignore_index=True)
+
+    df_metrics = pd.DataFrame(all_metrics)
+
+    return df_metrics, df_results, df_ids
+
+
+def inference(model, dl_eval, targets, device):
+    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, dl_eval, device)
+    metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
+
+    if "visual_read" in targets.split(","):
+        df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 'pred':np.concatenate(preds, axis=0), 'prob':np.concatenate(probs, axis=0)})
+    elif 'CL' in targets.split(","):
+        df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0), 'pred':np.concatenate(cents, axis=0)})
+
+    return metrics, df_result
+
+
+def few_shots(base_model, df_fs, df_eval, tfm, args, it):
+    # loaders
+    dl_fs_tr = get_loader(df_fs, tfm, args, augment=True, shuffle=True)
+    dl_fs_va = get_loader(df_fs, tfm, args, augment=False, shuffle=False)
+    dl_eval  = get_loader(df_eval, tfm, args, augment=False, shuffle=False)
+
+    model = copy.deepcopy(base_model) # clone model (important!)
+    # freeze backbone
+    model = freeze_all_but_last_k(model, args.unfreeze_layers)
+
+    # finetune
+    model = finetune(model, dl_fs_tr, dl_fs_va, it, args, fold_name=f"fewshot-{args.few_shot}_iter-{args.few_shot_iterations}-{it}")
+
+    # evaluate
+    metrics, df_result = inference(model, dl_eval, args.targets, args.device)
+
+    return metrics, df_result
+
+
+def finetune(model, dl_tr, dl_va, it, args, fold_name="few-shots"):
+    '''
+    Finetune the given model using the few-shot training and validation on the same set of dataloaders.
+    '''
+    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                            lr=args.lr, weight_decay=args.weight_decay,)
+    # sched = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) # often off in finetune
+
+    finetune_path = os.path.join(args.output_path, f"fewshot-{args.few_shot}") ### ! Same as in run_few_shots()
+    save_path = f"{finetune_path}/iter-{args.few_shot_iterations}-{it}"
+    path_list = [f"{save_path}_metrics_per_epoch.csv", f"{save_path}_trainning_loss_per_epoch.csv", f"{save_path}_finetuned_best.pt"]
+
+    model, _ = train_model(model, dl_tr, dl_va, args=args, optimizer=opt,
+                                    scheduler=None, fold_name=fold_name, path_list=path_list)
+
+    if os.path.exists(path_list[2]):
+        model = load_best_checkpoint(model, ckpt_path=path_list[2], device=args.device)
+    else:
+        print("⚠ No finetune checkpoint found, using last-epoch weights")
+
+    return model
 
 
 def load_validation_data(args):
@@ -52,6 +150,7 @@ def load_validation_data(args):
 
     return tfm, dl_va, df
 
+
 def load_preatrained_model(args, df) -> torch.nn.Module:
     """
     Load a pretrained model checkpoint into the given model architecture.
@@ -78,113 +177,115 @@ def load_preatrained_model(args, df) -> torch.nn.Module:
     return model, targets_list
 
 
-def freeze_all_but_last_k(model, k: int):
+def freeze_all_but_last_k(model: nn.Module, k: int):
     """
-    Freezes all layers except the last K layers of the model.head (or Conv stack).
-    K = 1 means: only the final linear layer is trainable.
+    Freeze all parameters except the last K *parameterized layers*.
     """
 
-    # Freeze all params
+    # 1. Freeze everything
     for p in model.parameters():
         p.requires_grad = False
 
-    # Unfreeze the last K layers of the Sequential head
-    head_layers = list(model.head.children())
-    if k > len(head_layers): 
-        k = len(head_layers)
+    # 2. Collect modules that own parameters (in forward order)
+    param_layers = []
+    for module in model.modules():
+        # Only count modules that *directly* own parameters
+        if any(p.requires_grad is False for p in module.parameters(recurse=False)) \
+           and len(list(module.parameters(recurse=False))) > 0:
+            param_layers.append(module)
 
-    unfreeze = head_layers[-k:]
+    if len(param_layers) == 0: raise ValueError("No parameterized layers found in model.")
 
-    for layer in unfreeze:
-        for p in layer.parameters():
+    # 3. Clamp k
+    k = min(k, len(param_layers))
+
+    # 4. Unfreeze last K parameterized layers
+    for layer in param_layers[-k:]:
+        for p in layer.parameters(recurse=False):
             p.requires_grad = True
-    
-    print(f"✓ Unfroze last {k} layers of the model head.")
-    return model
 
-
-def finetune(model: torch.nn.Module, dl_tr: torch.utils.data.DataLoader, dl_va: torch.utils.data.DataLoader, args, epochs: int = 10) -> torch.nn.Module:
-    """
-    Fine-tune the *last few layers* of a pretrained model using a small labeled dataset.
-
-    Parameters
-    ----------
-    model : The pretrained model with selected layers unfrozen (typically via `freeze_all_but_last_k()` before calling this function).
-    dl_tr : Few-shot training dataloader. Should contain very small number of subjects (e.g., 5–20).
-    dl_va : Few-shot validation dataloader (usually same subjects or a small held-out subset).
-    args : argparse.Namespace in params.py
-    epochs : Number of finetuning epochs. Defaults to 10. Note: In few-shot learning, 5–20 epochs is often sufficient.
-
-    Returns
-    -------
-        The finetuned model with weights updated using few-shot data.
-        The returned model has best-validation weights loaded into memory.
-
-    Notes
-    -----
-    - Only parameters with `requires_grad=True` are updated.
-    - Best checkpoint is selected by lowest `val_loss`.
-    - Uses the existing train_one_epoch(), evals(), and compute_metrics() utilities
-      from your training framework for consistency.
-
-    """
-    # ---------------------------
-    # Optimizer only updates trainable (unfrozen) layers
-    # ---------------------------
-    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
-                            lr=args.lr,
-                            weight_decay=args.weight_decay,)
-
-    # Mixed precision scaler (only used if CUDA available)
-    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
-
-    # Track best validation score
-    best_val = float("inf")
-    ckpt_path = os.path.join(args.output_path, "finetuned.pt")
-
-    for epoch in range(1, epochs + 1):
-        print(f"\n---- Fine-tuning Epoch {epoch}/{epochs} ----")
-
-        # TRAIN on few-shot data
-        tr_loss, _ = train_one_epoch(model, dl_tr, opt, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
-        print(f"Train loss = {tr_loss:.4f}")
-
-        # VALIDATE
-        probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, dl_va, args.device)
-        metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
-        print(f"Validation metrics = {metrics}")
-
-        # SAVE BEST MODEL CHECKPOINT
-        if metrics["val_loss"] < best_val:
-            best_val = metrics["val_loss"]
-            torch.save({"model": model.state_dict()}, ckpt_path)
-            print(f"✓ Saved finetuned checkpoint → {ckpt_path}")
-
-    # ---------------------------
-    # Load best validation checkpoint
-    # ---------------------------
-    sd = torch.load(ckpt_path, map_location=args.device)
-    model.load_state_dict(sd["model"], strict=False)
+    # 5. Logging
+    print(f"✓ Unfroze last {k} parameterized layers:")
+    for layer in param_layers[-k:]:
+        print(f"  - {layer.__class__.__name__}")
 
     return model
 
 
-def inference_one_scan(model_path, pet_path, args, id=None):
-    model = torch.load(model_path, map_location=args.device) # using device of current 
+def stratified_few_shot_split(df: pd.DataFrame, n_shot: int, stratify_col: str, seed: int):
+    """
+    Returns:
+      df_fs  : few-shot dataframe
+      df_eval: disjoint evaluation dataframe
+    """
+    if n_shot >= len(df):
+        raise ValueError("few-shot size must be < dataset size")
 
-    if id is None: id = pet_path.split('/')[-1].split('_')[1] # specific to IDEAS dataset
-    df = pd.DataFrame({'ID': id, 'pet_path': pet_path})
+    y = df[stratify_col]
 
-    tfm = get_transforms(tuple(args.image_shape))
-    loader = get_loader(df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
+    splitter = StratifiedShuffleSplit(n_splits=1, train_size=n_shot, random_state=seed,)
 
-    # evaluations
-    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, loader, args.device)
-    if not torch.isnan(ycls).all() or not torch.isnan(yreg).all():
-        metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
+    fs_idx, eval_idx = next(splitter.split(df, y))
+    df_fs = df.iloc[fs_idx].reset_index(drop=True)
+    df_eval = df.iloc[eval_idx].reset_index(drop=True)
+
+    return df_fs, df_eval
+
+
+def add_quantile_bins(df, col, n_bins=5):
+    df = df.copy()
+    df["_qbin"] = pd.qcut(df[col], q=n_bins, duplicates="drop")
+    return df
+
+
+def bootstrap_ci(values, n_boot=2000, ci=95, seed=0):
+    rng = np.random.default_rng(seed)
+    values = np.asarray(values)
+
+    boots = [
+        np.mean(rng.choice(values, size=len(values), replace=True))
+        for _ in range(n_boot)
+    ]
+
+    lo = np.percentile(boots, (100 - ci) / 2)
+    hi = np.percentile(boots, 100 - (100 - ci) / 2)
+
+    return float(np.mean(values)), float(lo), float(hi)
+
+
+def summarize_results(zero_metrics, few_metrics):
+    print("\n========== SUMMARY (mean ± CI) ==========")
+
+    keys = zero_metrics[0].keys()
+
+    for k in keys:
+        z_vals = [m[k] for m in zero_metrics if np.isfinite(m[k])]
+        f_vals = [m[k] for m in few_metrics if np.isfinite(m[k])]
+
+        if not z_vals or not f_vals:
+            continue
+
+        z_mean, z_lo, z_hi = bootstrap_ci(z_vals)
+        f_mean, f_lo, f_hi = bootstrap_ci(f_vals)
+
+        print(
+            f"{k:>10} | "
+            f"Zero: {z_mean:.3f} [{z_lo:.3f}, {z_hi:.3f}] | "
+            f"Few:  {f_mean:.3f} [{f_lo:.3f}, {f_hi:.3f}]"
+        )
+    print("=================DONE====================\n")
+
+
+def save_predictions(ycls, preds, probs, yreg, cents, any_cls, any_reg, out_csv):
+    if any_cls:
+        df = pd.DataFrame({"y":    np.concatenate(ycls),
+                           "pred": np.concatenate(preds),
+                           "prob": np.concatenate(probs)})
+    elif any_reg:
+        df = pd.DataFrame({"y":    np.concatenate(yreg),
+                           "pred": np.concatenate(cents)})
     else:
-        metrics = None
+        raise ValueError("No valid predictions to save")
 
-    # attention map
-    _ = explain_one_occlusion(model, pet_path, out_nifti_path=None, return_affine=False,
-                                 mask_size=(16,16,16), overlap=0.6, activate=True, device="cuda")
+    df.to_csv(out_csv, index=False)
+    return df

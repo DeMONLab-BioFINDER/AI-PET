@@ -1,5 +1,6 @@
 # src/hypertune.py
-import os, optuna
+import os
+import optuna
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -44,9 +45,7 @@ def objective(trial, base_args, df_clean, splits, model_name):
         val_df   = df_clean.iloc[va_idx].reset_index(drop=True)
 
         # run one fold (your run_fold already logs/plots inside its own folder)
-        m = run_fold(train_df, val_df, targs, fold_name=fold_name,
-            es_patience=targs.es_patience, es_min_delta=targs.es_min_delta,
-            on_epoch_end=reporter)
+        m = run_fold(train_df, val_df, targs, fold_name=fold_name, on_epoch_end=reporter)
         val = combine_metrics_for_minimize(m)
         scores.append(val)
 

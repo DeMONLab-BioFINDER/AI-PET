@@ -66,6 +66,19 @@ def get_device(prefer_cuda=True, force_cpu=False):
     torch.backends.cudnn.benchmark = True  # 3D convs benefit
     return torch.device("cpu")
 
+def load_best_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.device):
+    """
+    Load model weights from checkpoint path into the given model.
+    """
+    if os.path.exists(ckpt_path):
+        try:
+            sd = torch.load(ckpt_path, map_location=device, weights_only=True)
+        except TypeError:
+            sd = torch.load(ckpt_path, map_location=device)
+        print(f"Loading checkpoint: {ckpt_path}")
+        state_dict = sd.get("model", sd) if isinstance(sd, dict) else sd
+        model.load_state_dict(state_dict, strict=False)
+    return model
 
 def compute_smooth_sigma_vox(voxel_sizes_mm: tuple[float, float, float], fwhm_current_mm: float, fwhm_target_mm: float) -> tuple[float, float, float] | None:
     """
