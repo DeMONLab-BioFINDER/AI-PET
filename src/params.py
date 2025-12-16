@@ -57,6 +57,7 @@ def parse_arguments():
     # Validation / Testing
     parser.add_argument("--best_model_folder", type=str, default=None, help="Path to the folder that contains the best model checkpoint for external validation.") #CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211
     parser.add_argument("--voxel_sizes", type=lambda s: tuple(float(x) for x in s.split(",")), default=None, help="input image voxel sizes in mm as comma-separated values for smoothing, e.g. 2.0,2.0,2.0")
+    parser.add_argument("--finetune_epochs", type=int, default=50, help="Max epochs for few-shot finetuning (early stopping usually triggers earlier).")
     parser.add_argument("--few_shot", type=int, default=0, help="Number of few-shot samples to use for fine-tuning.")
     parser.add_argument("--few_shot_iterations", type=int, default=100, help="Number of few-shot iterations to run.")
     parser.add_argument("--unfreeze_layers", type=int, default=1, help="Number of last layers to unfreeze during few-shot finetuning. (e.g., 1 = final linear layer; 2 = dropout + linear).")

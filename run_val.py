@@ -23,6 +23,8 @@ def main(args):
     # FEW-SHOT FINETUNING 
     if args.few_shot > 0:
         print("\n========== FEW-SHOT FINETUNING MODE ==========\n")
+        print('set finetune epochs', args.epochs, '(orginal) to', args.finetune_epochs)
+        args.epochs = args.finetune_epochs
         df_metrics, df_results, df_ids = run_few_shots(args, df, tfm, model, targets_list)
         print("metrics:")
         print(df_metrics.describe())
