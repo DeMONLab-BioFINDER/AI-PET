@@ -3,131 +3,155 @@ import torch
 import numpy as np
 import torch.nn as nn
 import nibabel as nib
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from monai.visualize.occlusion_sensitivity import OcclusionSensitivity
 from monai.visualize.class_activation_maps import GradCAM
 
-from src.data import get_transforms
 
-'''
-Only run the file if has images under the path
-'''
-@torch.no_grad()
-def explain_one_occlusion(model, nii_path, out_nifti_path=None, return_affine=False,
-                          mask_size=(16,16,16), overlap=0.6, activate=True, device="cuda"):
-    model.eval().to(device)
-    vol = get_transforms()(nii_path) ## !!!remains to be solved
-    vol = torch.as_tensor(vol, dtype=torch.float32, device=device).unsqueeze(0)  # [1,1,D,H,W]
-    if return_affine or out_nifti_path: affine = nib.load(nii_path).affine
-
-    occ = OcclusionSensitivity(nn_module=model, mask_size=mask_size, n_batch=16, overlap=overlap, activate=activate)
-    occ_map, _ = occ(x=vol)                     # [1,1,D,H,W,1] typically
-    # heat = heat.clamp(min=0)              # optional: keep positive importance
-    heat = (-occ_map).float().squeeze().cpu().numpy()  # [D,H,W], larger = more important
-
-    if out_nifti_path: nib.save(nib.Nifti1Image(heat, affine), out_nifti_path)
-
-    if return_affine:
-        return heat, affine
-    else:
-        return heat
-
-
-@torch.no_grad()
-def group_occlusion_maps(model, paths, out_dir: str, *,                     
-                         mask_size=(16,16,16), overlap=0.6, activate=True, device="cuda"):  # True for classification, False for pure regression
+def run_visualization(model, loader, device, output_path, vis_name="gradcam",
+                      vis_kwargs=None, affine_fn=None): # optional: get affine per subject
     """
-    Saves:
-      - group_mean.nii.gz (mean heat across all cases)
-      - group_std.nii.gz  (std  heat across all cases)
-    If binary classification (y_cls present with two values):
-      - group_pos_mean.nii.gz
-      - group_neg_mean.nii.gz
-      - group_contrast_pos_minus_neg.nii.gz
+    Generic runner for per-case + group-level visualization maps.
     """
-    os.makedirs(out_dir, exist_ok=True)
+    VIS_REGISTRY = {
+    "gradcam": gradcam_vis_fn,
+    "occlusion": occlusion_vis_fn,
+    }
+    vis_fn = VIS_REGISTRY[vis_name]
+    vis_kwargs = vis_kwargs or {}
 
-    all_sums, all_sqsum, n_total = None, None, 0
-    for nii_path in paths:
-        if n_total== 0:
-            heat, ref_affine = explain_one_occlusion(model, nii_path, return_affine=True, mask_size=mask_size, overlap=overlap, activate=activate, device=device) # [D,H,W]
-        else:
-            heat, _ = explain_one_occlusion(model, nii_path, return_affine=False, mask_size=mask_size, overlap=overlap, activate=activate, device=device) # [D,H,W]
+    vis_dir = os.path.join(output_path, 'visualization', vis_name)
+    os.makedirs(vis_dir, exist_ok=True)
 
-        # accumulate global mean/std
-        if all_sums is None: # h # [B,D,H,W]
-            shp = heat.shape                 # [D,H,W]
-            all_sums  = np.zeros(shp, np.float64)
-            all_sqsum = np.zeros(shp, np.float64)
-        all_sums  += heat #h.sum(axis=0)
-        all_sqsum += heat**2 #(h**2).sum(axis=0)
-        n_total   += 1 #h.shape[0]
+    vis_sum = None
+    n = 0
+    for i, (x, _, _, extra, pid) in enumerate(loader):
+        x = x.to(device)
+        extra = extra.to(device)
+        
+        B = x.shape[0]
 
-    # finalize
-    if n_total == 0: raise RuntimeError("No samples seen in in path.")
+        for b in range(B):
+            xb = x[b:b+1]                          # [1, C, D, H, W]
+            extrab = extra[b:b+1] if extra is not None else None
+            pid_b = pid[b]
 
-    mean_map = (all_sums / n_total).astype(np.float32)
-    var_map  = (all_sqsum / n_total - mean_map**2).clip(min=0.0)
-    std_map  = np.sqrt(var_map).astype(np.float32)
+            heat = vis_fn(model=model, x=xb, extra=extrab, **vis_kwargs)  # [D,H,W]
+            assert heat.ndim == 3
+            mask = (xb != 0).any(dim=1)[0].float().cpu().numpy()
+            heat = heat * mask  # mask out background
 
-    nib.save(nib.Nifti1Image(mean_map, ref_affine), os.path.join(out_dir, "group_mean.nii.gz"))
-    nib.save(nib.Nifti1Image(std_map,  ref_affine), os.path.join(out_dir, "group_std.nii.gz"))
+            affine = affine_fn(pid_b) if affine_fn else np.eye(4)
+
+            # per-case outputs
+            nii_path = os.path.join(vis_dir, f"{pid_b}_{vis_name}.nii.gz")
+            png_path = os.path.join(vis_dir, f"{pid_b}_{vis_name}.png")
+
+            nib.save(nib.Nifti1Image(heat.astype(np.float32), affine), nii_path)
+            save_png_slices(heat, png_path)
+
+            vis_sum = heat if vis_sum is None else vis_sum + heat
+            n += 1
+
+    # group-level average
+    vis_avg = vis_sum / n
+    nib.save(nib.Nifti1Image(vis_avg.astype(np.float32), np.eye(4)),
+             os.path.join(vis_dir, f"group_average_{vis_name}.nii.gz"))
+    save_png_slices(vis_avg,os.path.join(vis_dir, f"group_average_{vis_name}.png"))
 
 
-def grad_cam(model, x, # [1, C, D, H, W]
-             target_layer: str | None = None,      # auto-pick last Conv3d if None
-             class_idx: int | None = None,         # auto from model output if None
-             upsample_mode: str = "trilinear", align_corners: bool = False, 
-             normalize: bool = True) -> np.ndarray: # min-max to [0,1]
-    """
-    Compute Grad-CAM (or Grad-CAM++) for a 3D model that outputs logits.
-    Returns a NumPy array of shape (D, H, W).
-    """
-    assert x.ndim == 5 and x.size(0) == 1, "x must be a single 3D volume: [1, C, D, H, W]"
+def gradcam_vis_fn(model, x, extra, target_layer=None, normalize=True, upsample_mode="trilinear"):
     model.eval()
-
-    # --- pick target layer: last Conv3d if not provided
+    
+    def fwd(x_):
+        return model(x_, extra=extra)
+    
+    # pick last Conv3d
     if target_layer is None:
-        last = None
         for name, m in model.named_modules():
             if isinstance(m, nn.Conv3d):
-                last = name
-        if last is None: raise ValueError("No Conv3d layer found; specify target_layer explicitly.")
-        target_layer = last
-    #print(f"Using target layer: {target_layer}")
+                target_layer = name
+    if target_layer is None: raise ValueError("No Conv3d layer found")
 
-    # --- forward once to get logits and decide class_idx if needed
-    if class_idx is None:
-        with torch.inference_mode():
-            logits = model(x)  # expected shapes: [B,1] or [B,2] (or [B,C])
-        if logits.ndim == 1: logits = logits.unsqueeze(1)    # [B] -> make it [B,1]
-        n_classes = logits.shape[1]
-        class_idx = 0 if n_classes == 1 else int(torch.argmin(logits, dim=1).item())  # predicted class # argmin because the pos and neg flag is revert in trainnig
-    else: # sanity check
-        if not (0 <= int(class_idx) < n_classes):
-            raise ValueError(f"class_idx {class_idx} out of range 0..{n_classes-1}")
-    
-    cam = GradCAM(nn_module=model, target_layers=target_layer)
-    # --- compute CAM (disable AMP for stable grads)
-    with torch.amp.autocast(device_type="cuda", enabled=False):
-        cam_map = cam(x, class_idx=int(class_idx))   # [B, 1, d, h, w]
-    cam_map = cam_map.detach()
+    cam = GradCAM(model, target_layers=[target_layer])
 
-    # --- upsample to input spatial size if needed
-    in_spatial = x.shape[-3:]
-    cam_spatial = cam_map.shape[-3:]
-    if cam_spatial != in_spatial:
-        print('Upsample to input space')
-        cam_map = F.interpolate(cam_map, size=in_spatial, mode=upsample_mode, align_corners=align_corners)
+    with torch.amp.autocast("cuda", enabled=False):
+        cam_map = cam(x, extra=extra)  # calls fwd(x) # class_idx – Default to None (computing class_idx from argmax); layer_idx – index of the target layer if there are multiple target layers
 
-    cam_np = cam_map[0, 0].cpu().float().numpy()  # (D, H, W)
+    # post-proc
+    if cam_map.shape[-3:] != x.shape[-3:]: cam_map = F.interpolate(cam_map, x.shape[-3:], mode=upsample_mode) # upsample
+    cam_np = cam_map[0, 0].cpu().numpy()
+    if normalize: # normalize
+        vmin, vmax = cam_np.min(), cam_np.max()
+        cam_np = (cam_np - vmin) / (vmax - vmin) if vmax > vmin else np.zeros_like(cam_np)
 
-    # --- normalize to [0,1] if requested
-    if normalize:
-        vmin, vmax = np.nanmin(cam_np), np.nanmax(cam_np)
-        if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
-            cam_np = (cam_np - vmin) / (vmax - vmin)
-        else:
-            cam_np = np.zeros_like(cam_np, dtype=np.float32)
+    return cam_np
 
-    return cam_np, class_idx, logits.detach().cpu().numpy() # (D, H, W)
+
+@torch.no_grad()
+def occlusion_vis_fn(model, x, extra, **kwargs):
+    model.eval()
+
+    def fwd(x_):
+        return model(x_, extra=extra)
+
+    occ = OcclusionSensitivity(nn_module=model, mask_size=kwargs.get("mask_size", (16,16,16)),
+                               n_batch=kwargs.get("n_batch", 16), overlap=kwargs.get("overlap", 0.6),
+                               activate=kwargs.get("activate", True),)
+    occ_map, _ = occ(x, extra=extra)  # [1,1,D,H,W,1] # calls fwd(x)
+    heat = (-occ_map).float().squeeze().cpu().numpy()
+    return heat
+
+
+
+def save_png_slices(vis_np, img_np, out_path, k=5, cmap="hot", alpha=0.4):
+    """
+    Save a grid of k slices for axial / coronal / sagittal views.
+    """
+    assert vis_np.shape == img_np.shape
+    assert k % 2 == 1, "k must be odd to include center slice"
+
+    D, H, W = vis_np.shape
+    z_idxs = _sample_slices(D, k)
+    y_idxs = _sample_slices(H, k)
+    x_idxs = _sample_slices(W, k)
+
+    fig, axes = plt.subplots(k, 3, figsize=(9, 3 * k))
+
+    for i in range(k):
+        axes[i, 0].imshow(img_np[z_idxs[i], :, :], cmap="gray")
+        axes[i, 0].imshow(vis_np[z_idxs[i], :, :], cmap=cmap, alpha=alpha)
+        axes[i, 0].set_ylabel(f"z={z_idxs[i]}")
+        axes[i, 0].set_title("Axial" if i == 0 else "")
+        axes[i, 0].axis("off")
+
+        axes[i, 1].imshow(img_np[:, y_idxs[i], :], cmap="gray")
+        axes[i, 1].imshow(vis_np[:, y_idxs[i], :], cmap=cmap, alpha=alpha)
+        axes[i, 1].set_title("Coronal" if i == 0 else "")
+        axes[i, 1].axis("off")
+
+        axes[i, 2].imshow(img_np[:, :, x_idxs[i]], cmap="gray")
+        axes[i, 2].imshow(vis_np[:, :, x_idxs[i]], cmap=cmap, alpha=alpha)
+        axes[i, 2].set_title("Sagittal" if i == 0 else "")
+        axes[i, 2].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+
+def _sample_slices(n, k=5):
+    """
+    Sample k slice indices from range [0, n-1], always including center.
+    """
+    assert k % 2 == 1, "k must be odd to include center"
+    center = n // 2
+    half = k // 2
+
+    # evenly spaced offsets
+    max_offset = min(center, n - center - 1)
+    offsets = np.linspace(-max_offset, max_offset, k).astype(int)
+
+    idxs = np.clip(center + offsets, 0, n - 1)
+    return idxs

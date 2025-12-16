@@ -22,7 +22,8 @@ def parse_arguments():
     parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm or SCANS (folder name of Berkeley server ADNI data)')
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
     parser.add_argument("--image_shape", nargs=3, type=int, default=[128,128,128], help="Input image shape (x,y,z) after resampling, can be tuned by Optuna")
-
+    parser.add_argument("--input_cl", type=str, default=None, help="Name of extra input CL used to plug in at the last fully connected layer, should be the column name in demo.csv e.g. CL, CL_pred")
+    
     # Model args
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -52,12 +53,15 @@ def parse_arguments():
     parser.add_argument("--tune_timeout", type=int, default=None, help="Seconds to stop tuning (optional).")
     
     # Validation / Testing
-    parser.add_argument("--best_model_folder", type=str, default="CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211", help="Path to the folder that contains the best model checkpoint for external validation.")
+    parser.add_argument("--best_model_folder", type=str, default=None, help="Path to the folder that contains the best model checkpoint for external validation.") #CNN3D_CL_2split80-20_stratify-visual_read,site_IDEAS_Inten_Norm_20251004_022211
     parser.add_argument("--voxel_sizes", type=lambda s: tuple(float(x) for x in s.split(",")), default=None, help="input image voxel sizes in mm as comma-separated values for smoothing, e.g. 2.0,2.0,2.0")
     parser.add_argument("--few_shot_csv", type=str, default=None, help="Path to CSV file for few-shot finetuning (optional). columns must include pet_path + target label. If None, no fine-tuning is performed.")
     parser.add_argument("--unfreeze_layers", type=int, default=2, help="Number of last layers to unfreeze during few-shot finetuning. (e.g., 1 = final linear layer; 2 = dropout + linear).")
     parser.add_argument("--finetune_epochs", type=int, default=10, help="Number of epochs for few-shot finetuning.")
     
+    # Visualization
+    parser.add_argument("--visualization_name", type=str, default='gradcam', help="Interpretation method. e.g. 'gradcam' or 'occlusion'")
+
     # Parse arguments and set up the output directory
     args, unknown = parser.parse_known_args()
     args = make_output_dir(args, proj_path, script_dir)
@@ -110,7 +114,9 @@ def make_output_dir(args, proj_path, script_path):
     else:
         # Construct output path'
         tune = f'hypertune-optuna-{args.n_trials}trials' if args.tune else '2split80-20'
-        args.output_name = "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, args.output_date_time])
+        extra_cl = f'extra-lastlayer-input-{args.input_cl}' if args.input_cl else ''
+        args.output_name = "_".join(s for s in [args.model, args.targets, tune, f"stratify-{args.stratifycvby}", args.model_name_extra, extra_cl, args.output_date_time] if s)
+        # "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, extra_cl, args.output_date_time])
         args.output_path = os.path.join(proj_path, "results", args.output_name)
 
     # Create output directory

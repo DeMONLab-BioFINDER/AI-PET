@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from src.data import get_train_val_loaders
 from src.early_stopping import EarlyStopper
 from src.train import train_one_epoch, eval_epoch
-from src.cam import find_last_conv3d, GradCAM3D, save_gradcam_overlays_avg_by_slice
+from src.vis import run_visualization
 from src.utils import append_metrics_row, save_checkpoint, build_model_from_args, append_epoch_metrics_csv, plot_metrics_from_csv, save_train_test_subjects
 
 
@@ -88,7 +88,7 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
             continue
 
         # CV mode: evaluate each epoch on validation    
-        metrics = eval_epoch(model, dl_va, args.device, sched)
+        metrics = eval_epoch(model, dl_va, args.device)
 
         # Keep the tqdm bar neat
         epoch_bar.set_postfix(
@@ -108,9 +108,6 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
         # report to Optuna if callback provided
         if on_epoch_end is not None: on_epoch_end(int(fold_name.split('-k')[-1]) if 'trial' in fold_name else 0, epoch, val_metric)
 
-        # checkpoint best
-        #if epoch == 1 and not os.path.exists(os.path.join(ckpt_dir, "best.pt")):
-        #    save_checkpoint(model, os.path.join(ckpt_dir, "best.pt"))
         # append epoch metrics to CSV
         append_epoch_metrics_csv(csv_path, epoch, {**metrics, "train_loss": tr_loss})
         append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
@@ -142,14 +139,8 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
     
     # Visuals: only in CV mode and only using validation loader
     if not final_retrain:
-        # Grad-CAM snapshots for the best model on validation set
-        target_layer = find_last_conv3d(model)  # generic for CNN3D, UNet3D, etc.
-        last_metrics = eval_epoch(model, dl_va, args.device)
-        task = "cls" if not np.isnan(metrics['auc']) else ("reg" if not np.isnan(metrics['r2']) else "auto")
-        cam = GradCAM3D(model, target_layer=target_layer, task=task)
-        save_gradcam_overlays_avg_by_slice(model, cam, dl_va, viz_dir, args.device, max_items=8)
-
         # metrics to return (CV)
+        last_metrics = eval_epoch(model, dl_va, args.device)
         final_metrics = last_metrics
         final_metrics["best_epoch"] = int(best_epoch)
         plot_metrics_from_csv(csv_path, os.path.join(fold_dir, "metrics.png"))
@@ -159,6 +150,10 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
                 f"RMSE={final_metrics.get('rmse', float('nan')):.2f} "
                 f"R2={final_metrics.get('r2', float('nan')):.3f} "
                 f"val_metric={final_metrics.get('val_metric', float('nan')):.3f}")
+        
+        # Visualization for the best model on validation set, save .png and .nii
+        run_visualization(model, dl_va, args.device, args.output_path, vis_name=args.visualization_name)
+        
         return final_metrics
 
     # Final retrain mode: evaluate ONCE on dl_va (which you pass as OUTER TEST)
@@ -169,7 +164,6 @@ def run_fold(train_df, val_df, args, fold_name: str, *,
                f"RMSE={test_metrics.get('rmse', float('nan')):.2f} "
                f"R2={test_metrics.get('r2', float('nan')):.3f}")
     return test_metrics
-
 
 
 def _make_outfolder_fold(output_path, fold_name):

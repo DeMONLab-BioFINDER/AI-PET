@@ -25,7 +25,7 @@ class CNN3D(nn.Module):
         "batch" or "instance" normalization.
     """
     def __init__(self, in_channels: int = 1, widths=(16, 32, 64, 128), pool_every: int = 1,
-                 dropout: float = 0.2, norm: str = "batch", num_classes=1):
+                 dropout: float = 0.2, norm: str = "batch", num_classes=1, extra_dim=0):
         super().__init__()
         assert pool_every >= 1
         assert norm in {"batch", "instance"}
@@ -53,11 +53,17 @@ class CNN3D(nn.Module):
 
         self.features = nn.Sequential(*layers)
         self.gap = nn.AdaptiveAvgPool3d(1)
-        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(widths[-1], num_classes))
+        in_fc = widths[-1] + extra_dim
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_fc, num_classes))
 
-    def forward(self, x):
+    def forward(self, x, extra):
         x = self.features(x)       # [B, C, D, H, W]
         x = self.gap(x).flatten(1) # [B, C]
+
+        if extra is not None and torch.isfinite(extra).any():
+            if extra.ndim == 1: extra = extra.unsqueeze(0)
+            x = torch.cat([x, extra], dim=1)
+
         y = self.head(x)           # [B, num_classes]
         return y
     

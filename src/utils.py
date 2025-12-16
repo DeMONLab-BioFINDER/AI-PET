@@ -164,6 +164,11 @@ def build_model_from_args(args, device=None, n_classes: int | None = None):
                 "widths": tuple(getattr(args, "widths", (32, 64, 128, 256))),
                 "dropout": getattr(args, "dropout", 0.3),
             }
+    
+    if hasattr(args, "input_cl") and args.input_cl is not None:
+        defaults["extra_dim"] = 1
+    else:
+        defaults["extra_dim"] = 0
 
     # JSON-only model kwargs
     extra = {}

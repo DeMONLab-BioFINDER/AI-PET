@@ -8,13 +8,14 @@ from typing import Any, Tuple, Optional
 from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, root_mean_squared_error, roc_curve, balanced_accuracy_score, f1_score, matthews_corrcoef
 
 
-def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w_cls=1.0, loss_w_reg=1.0):
+def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_reg=1.0, output_loss=None):
     model.train()
     mse = nn.MSELoss()
     losses = []
 
-    for x, y_cls, y_reg, _ in tqdm(loader, desc="Train", leave=False):
+    for x, y_cls, y_reg, extra, _ in tqdm(loader, desc="Train", leave=False):
         x = x.to(device)
+        extra = extra.to(device)
         y_cls = y_cls.to(device) if y_cls is not None else None
         y_reg = y_reg.to(device) if y_reg is not None else None
 
@@ -22,15 +23,14 @@ def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w
 
         if scaler is not None:
             with torch.cuda.amp.autocast():
-                loss, _ = compute_total_loss(model, x, y_cls, y_reg,
+                loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
                     loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
         else:
-            loss, _ = compute_total_loss(model, x, y_cls, y_reg,
-                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg,
-                mse=mse)
+            loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
+                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, mse=mse)
             loss.backward()
             opt.step()
 
@@ -41,7 +41,7 @@ def train_one_epoch(model, loader, opt, scaler, device, output_loss=None, loss_w
 
 
 @torch.no_grad()
-def eval_epoch(model, loader, device, loss_w_cls=1.0, loss_w_reg=1.0):
+def eval_epoch(model, loader, device):
     probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, loader, device)
 
     metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
@@ -74,10 +74,11 @@ def evals(model, loader, device):
     probs, ycls, preds = [], [], []
     cents, yreg = [], []
     any_cls, any_reg = False, False
-    for x, y_cls, y_reg, _ in tqdm(loader, desc="Val", leave=False):
+    for x, y_cls, y_reg, extra, _ in tqdm(loader, desc="Val", leave=False):
         x = x.to(device)
-        out = model(x)
-        logit, cent, _ = unpack_model_outputs(out, y_cls, y_reg)
+        extra = extra.to(device)
+        out = model(x, extra=extra)
+        logit, cent, _ = unpack_model_outputs(out, y_reg)
 
         if (not y_cls.isnan().all()) and (logit is not None):
             any_cls = True
@@ -157,7 +158,8 @@ def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
     return metrics
 
 
-def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: Optional[torch.Tensor], y_reg: Optional[torch.Tensor],
+def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: torch.Tensor,
+                       y_reg: torch.Tensor, extra: torch.Tensor,
                        *, loss_w_cls: float = 1.0, loss_w_reg: float = 1.0,
                        mse: Optional[nn.Module] = None):
     """
@@ -166,8 +168,8 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: Optional[
     """
     if mse is None: mse = nn.MSELoss()
 
-    out = model(x)
-    logit, cent, _ = unpack_model_outputs(out, y_cls, y_reg)
+    out = model(x, extra=extra)
+    logit, cent, _ = unpack_model_outputs(out, y_reg)
 
     total = 0.0
     used_head = False
@@ -214,7 +216,7 @@ def opt_threshold(ycls, probs, pos):
     return acc_opt, bacc, f1, mcc, best_thr
 
 
-def unpack_model_outputs(out: Any, y_cls, y_reg) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+def unpack_model_outputs(out: Any, y_reg) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Normalize model outputs to (logit, cent, feats), where any can be None.
 

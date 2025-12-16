@@ -91,39 +91,38 @@ def find_pet_files(input_path: str, preproc_method: str, allow: Optional[Union[p
                 "ScanDate": None,
                 "tracer": None,
             })
-
-    # Pattern B -- ADNI data on Berkeley cluster
-    # e.g. /116-S-6550/PET_2018-08-29_FTP/SCANS/116-S-6550_AV1451_2018-08-29_P4-6mm_I1600375.nii
-    if '.nii' in preproc_method:
-        print(f'finding ADNI data /analysis/{preproc_method}')
-        method_pat = re.escape(preproc_method) + r'(?:\.gz)?'
-        regex_b = re.compile(
-            rf'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{{4}}-\d{{2}}-\d{{2}})_(?P<tracer>FBB|FBP)/analysis/{re.escape(preproc_method)}$')
-        #regex_b = re.compile(
-        #    r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/analysis/'r'wsuvr_cere[^/]*\.nii(?:\.gz)?$')
-        glob_pattern = "*analysis/*.nii*"
-    else: # step 4 ADNI data
-        print(f'finding ADNI data /SCANS/')
-        regex_b = re.compile(
-            r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$')
-        glob_pattern = "*SCANS/*.nii*"
-    print("PATTERN:", regex_b.pattern)
-    
-    for nii in ipath.rglob(glob_pattern):
-        m = regex_b.match(nii.relative_to(ipath).as_posix())
-        if not m: 
-            continue
-        rows.append({
-            "ID": m.group("ID").replace('-','_'),
-            "pet_path": str(nii),
-            "imagefile": nii.name,
-            "ScanDate": m.group("ScanDate"),
-            "tracer": m.group("tracer"),
-        })
+    else:
+        # Pattern B -- ADNI data on Berkeley cluster
+        # e.g. /116-S-6550/PET_2018-08-29_FTP/SCANS/116-S-6550_AV1451_2018-08-29_P4-6mm_I1600375.nii
+        if '.nii' in preproc_method:
+            print(f'finding ADNI data /analysis/{preproc_method}')
+            method_pat = re.escape(preproc_method) + r'(?:\.gz)?'
+            regex_b = re.compile(
+                rf'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{{4}}-\d{{2}}-\d{{2}})_(?P<tracer>FBB|FBP)/analysis/{re.escape(preproc_method)}$')
+            #regex_b = re.compile(
+            #    r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/analysis/'r'wsuvr_cere[^/]*\.nii(?:\.gz)?$')
+            glob_pattern = "*analysis/*.nii*"
+        else: # step 4 ADNI data
+            print(f'finding ADNI data /SCANS/')
+            regex_b = re.compile(
+                r'^(?P<ID>[^/]+)/PET_(?P<ScanDate>\d{4}-\d{2}-\d{2})_(?P<tracer>FBB|FBP)/SCANS/[^/]+\.nii(\.gz)?$')
+            glob_pattern = "*SCANS/*.nii*"
+        print("PATTERN:", regex_b.pattern)
+        
+        for nii in ipath.rglob(glob_pattern):
+            m = regex_b.match(nii.relative_to(ipath).as_posix())
+            if not m: 
+                continue
+            rows.append({
+                "ID": m.group("ID").replace('-','_'),
+                "pet_path": str(nii),
+                "imagefile": nii.name,
+                "ScanDate": m.group("ScanDate"),
+                "tracer": m.group("tracer"),
+            })
 
     df = pd.DataFrame(rows, columns=["ID", "pet_path", "imagefile", "ScanDate", "tracer"])
-    if df.empty:
-        return df
+    if df.empty: return df
 
     # Deterministic dedupe: keep first path per ID
     df = (df.sort_values(["ID", "pet_path"])
@@ -209,7 +208,7 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
     g = torch.Generator()
     g.manual_seed(args.seed)
 
-    dataset = PETDataset(df, tfm, args.targets, augment=augment)
+    dataset = PETDataset(df, tfm, args.targets, input_cl=args.input_cl, augment=augment)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                         worker_init_fn=seed_worker, generator=g,
                         num_workers=args.num_workers, pin_memory=False)
@@ -243,7 +242,7 @@ def brain_outer_mask(x):
 
 def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: float = 99.0,
     crop_foreground: bool = True, ras: bool = True, interp: str = "trilinear", out_range: tuple = (0.0, 1.0),
-    smooth_sigma_vox: tuple | None = None, apply_brain_mask: bool = True,):
+    smooth_sigma_vox: tuple | None = None, apply_brain_mask: bool = True, process: bool = True) -> Compose:
     """
     PET-optimized preprocessing pipeline using MONAI.
 
@@ -277,14 +276,15 @@ def get_transforms(target_shape=(128, 128, 128), pct_lo: float = 1.0, pct_hi: fl
     if smooth_sigma_vox is not None: # Smooth BEFORE crop/resize (improves SNR for bounding box & interpolation)
         steps.append(GaussianSmooth(sigma=smooth_sigma_vox))
 
-    if crop_foreground: steps.append(CropForeground()) # Crop out huge empty regions
-    steps.append(Resize(spatial_size=target_shape, mode=interp)) # Resamples to the target size
-    # Intensity normalization: maps voxel values between the 1st–99th percentile to [0,1] (clipping outliers)
-    steps.append(ScaleIntensityRangePercentiles(lower=pct_lo, upper=pct_hi, b_min=float(out_range[0]), b_max=float(out_range[1]), clip=True))
+    if process:
+        if crop_foreground: steps.append(CropForeground()) # Crop out huge empty regions
+        steps.append(Resize(spatial_size=target_shape, mode=interp)) # Resamples to the target size
+        # Intensity normalization: maps voxel values between the 1st–99th percentile to [0,1] (clipping outliers)
+        steps.append(ScaleIntensityRangePercentiles(lower=pct_lo, upper=pct_hi, b_min=float(out_range[0]), b_max=float(out_range[1]), clip=True))
 
-    # ---- Force background = 0 (critical for model to focus on brain) ----
-    if apply_brain_mask:
-        steps.append(Lambda(lambda x: x * brain_outer_mask(x))) # apply brain mask by threshold
+        # ---- Force background = 0 (critical for model to focus on brain) ----
+        if apply_brain_mask:
+            steps.append(Lambda(lambda x: x * brain_outer_mask(x))) # apply brain mask by threshold
     
     return Compose(steps)
 
@@ -295,10 +295,11 @@ class PETDataset(Dataset):
       - table columns: ["ID", "pet_path", "visual_read", "CL", ...]
       - transforms: a MONAI Compose returning a (1, D, H, W) Tensor/MetaTensor (float-like)
     """
-    def __init__(self, table: pd.DataFrame, transforms, targets, augment: bool = False, dtype=torch.float32):
+    def __init__(self, table: pd.DataFrame, transforms, targets, input_cl=None, augment: bool = False, dtype=torch.float32):
         self.table = table.reset_index(drop=True)
         self.transforms = transforms
         self.targets = [t.strip() for t in targets.split(",") if t.strip()]
+        self.input_cl = input_cl
         self.augment = augment
         self.dtype = dtype
 
@@ -341,4 +342,8 @@ class PETDataset(Dataset):
         if 'CL' in self.targets:
             y_reg = torch.tensor([row["CL"]], dtype=torch.float32)
 
-        return x, y_cls, y_reg, row["ID"]
+        # extra info
+        extra_input = torch.tensor([float('nan')])
+        if self.input_cl is not None:
+            extra_input = torch.tensor([row[self.input_cl]], dtype=torch.float32)
+        return x, y_cls, y_reg, extra_input, row["ID"]
