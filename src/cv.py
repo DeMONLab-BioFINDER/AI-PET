@@ -1,5 +1,5 @@
 # src/cv.py
-import os, torch
+import os, torch, pickle
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -9,14 +9,15 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from src.data import get_train_val_loaders
 from src.early_stopping import EarlyStopper
-from src.train import train_one_epoch, eval_epoch
+from src.train import train_one_epoch, inference
 from src.vis import run_visualization
-from src.utils import append_metrics_row, save_checkpoint, build_model_from_args, load_best_checkpoint, append_epoch_metrics_csv, plot_metrics_from_csv, save_train_test_subjects
+from src.utils import append_metrics_csv, save_checkpoint, build_model_from_args, load_best_checkpoint, plot_metrics_from_csv, save_train_test_subjects
 
 
 def kfold_cv(df_clean, stratify_labels, args):
     skf = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.seed)
     metrics_path = os.path.join(args.output_path, "metrics.csv")
+    results_path = os.path.join(args.output_path, "results.csv")
 
     pbar = tqdm(enumerate(skf.split(df_clean, stratify_labels), start=1),
                 total=args.n_splits, desc="Stratified K-Fold", position=0, leave=True)
@@ -27,11 +28,11 @@ def kfold_cv(df_clean, stratify_labels, args):
         val_df   = df_clean.iloc[va_idx].reset_index(drop=True)
         pbar.set_postfix(train=len(train_df), val=len(val_df))
 
-        m = run_fold(train_df, val_df, args, fold_name=fold_name)
+        m, r = run_fold(train_df, val_df, args, fold_name=fold_name)
         
-        # Log metrics
-        row = {"fold": i, **m}
-        append_metrics_row(metrics_path, row)
+        # Log results
+        append_metrics_csv(metrics_path, {"fold": i, **m}, mode='row')
+        append_metrics_csv(results_path, {"fold": i, **r}, mode='row')
 
         tqdm.write(f"[{fold_name}] AUC={m.get('auc'):.3f} ACC={m.get('acc'):.3f} "
                    f"MAE={m.get('mae'):.2f} RMSE={m.get('rmse'):.2f} R2={m.get('r2'):.3f}"
@@ -40,92 +41,95 @@ def kfold_cv(df_clean, stratify_labels, args):
     print(f"\nDone. Metrics saved to: {metrics_path}")
 
 
-def run_fold(train_df, val_df, args, fold_name: str, *, on_epoch_end=None):
+
+def run_fold(train_df, val_df, args, fold_name: str, *, optuna_report=None):
     """
-    Train and return metrics dict.
+    Train and inferecen on test set return metrics dict.
     Modes:
-      - Normal (CV): use_early_stop=True, use_scheduler=True, final_retrain=False
-      - Final retrain (Option A): final_retrain=True  => fixed epochs, no early stop/scheduler;
-        then evaluate once on val_df (outer test). No leakage.
+      - Normal CV: train_only=False, args.tune=False -> do early_stop and scheduler on same training set; inference on test set (val_df) loading the best trained model
+      - Hyperparameter tuning inner fold: train_only=False, args.tune=True -> do early_stop and scheduler, stopping on the test set; inference on test set (val_df) loading the best trained model
+      - Hyperparameter tuning outer fold: train_only=True, args.tune=True -> no early_stop/scheduler; inference on test set (val_df) using the trained model
     """
-    nestedcv_outer_test = (fold_name == "nestedcv-outer-test")
-    fold_dir, path_list = _make_outfolder_fold(args.output_path, fold_name) # path_list: csv_path, csv_loss_path, ckpt_path
-    save_train_test_subjects(train_df, val_df, fold_dir, fold_name)
+    train_only = (fold_name == "nestedcv-outer-test")
+    output_fold_dir, path_list = _make_outfolder_fold(args.output_path, fold_name) # path_list: csv_path, csv_loss_path, ckpt_path
+    save_train_test_subjects(train_df, val_df, output_fold_dir, fold_name)
 
     dl_tr, dl_va = get_train_val_loaders(train_df, val_df, args)
+    _, dl_eval = get_train_val_loaders(train_df, train_df, args)
 
     # Determine classification/regression
     targets_list = [t.strip() for t in args.targets.split(",") if t.strip()]
     n_classes = int(train_df["visual_read"].dropna().nunique()) if 'visual_read' in targets_list else None
 
     model = build_model_from_args(args, device=args.device, n_classes=n_classes)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    sched = (ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) if not nestedcv_outer_test else None) # NOT using Scheduler in final retrain
 
-    model, best_epoch = train_model(model, dl_tr, dl_va, args=args, optimizer=opt, scheduler=sched, fold_name=fold_name,
-                                    path_list=path_list, on_epoch_end=on_epoch_end)
+    # ---- Train ----
+    if args.tune:
+        model, best_epoch = train_model(model, dl_tr, dl_va, args=args, fold_name=fold_name,
+                                        path_list=path_list, optuna_report=optuna_report)
+    else:
+        print('Train (early stop and scheduler using training set, if not "train_only")')
+        model, best_epoch = train_model(model, dl_tr, dl_eval, args=args, fold_name=fold_name, path_list=path_list)
+    
+    plot_metrics_from_csv(path_list['train_eval_csv'], path_list['train_eval_png'])
 
-    # ---- Load best checkpoint (CV mode) ----
-    if not nestedcv_outer_test: # In final retrain, there is no val-based checkpoint; use LAST-EPOCH weights
-        model = load_best_checkpoint(model, ckpt_path=path_list[2], device=args.device)
+    # ---- Test (inference) ----
+    # Load best checkpoint
+    if not train_only: model = load_best_checkpoint(model, ckpt_path=path_list['ckpt'], device=args.device) # In final retrain, there is no val-based checkpoint; use LAST-EPOCH weights
+    
+    # inference and save resutls
+    metrics_tr, df_result_tr = inference(model, dl_va, args.device)
+    metrics_te, df_result_te = inference(model, dl_va, args.device)
+    metrics_te["best_epoch"] = int(best_epoch)
+    pickle.dump({'train':{'metric': metrics_tr, 'preds': df_result_tr},
+                 'test':{'metric': metrics_te, 'preds': df_result_te}}, open(path_list['train-test_eval_pkl'],'wb'))
 
-    metrics = eval_epoch(model, dl_va, args.device)
-    metrics["best_epoch"] = int(best_epoch)
-
-    # Visualization
-    plot_metrics_from_csv(path_list[0], os.path.join(fold_dir, "metrics.png"))
+    # ---- Interpretation: grad-CAM or ... ----
     run_visualization(model, dl_va, args.device, args.output_path, vis_name=args.visualization_name) # the best model on validation set, save .png and .nii
 
-    return metrics
+    return metrics_te, df_result_te
 
 
-def train_model(model, dl_tr, dl_va, *, args, optimizer, scheduler, fold_name, path_list, on_epoch_end=None):
+def train_model(model, dl_tr, dl_va, *, args, fold_name, path_list, optuna_report=None):
     """
     Unified training loop.
+    dl_tr and dl_va should be the same if not doing hyperparameter tunning CV training
+    when doing fine-tuning few shots, do early stop, not scheduler <-- dl_tr and dl_va should all be the few-shots images, don't touch test set
     """
-    assert len(path_list) == 3, f"Expected 3 paths, got {len(path_list)}"
-    csv_path, csv_loss_path, ckpt_path = path_list
-    nestedcv_outer_test = (fold_name == "nestedcv-outer-test")
+    train_only = (fold_name == "nestedcv-outer-test") #!!! train only, no early stop
 
     scaler = torch.cuda.amp.GradScaler() if args.amp and torch.cuda.is_available() else None
-    es = EarlyStopper(patience=args.es_patience, min_delta=args.es_min_delta) if  not nestedcv_outer_test else None
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6) # NOT using Scheduler in final retrain
+    es = EarlyStopper(patience=args.es_patience, min_delta=args.es_min_delta)
 
     best_epoch = 0
     epoch_bar = tqdm(range(1, args.epochs + 1), desc=f"{fold_name} epochs", position=1, leave=False, dynamic_ncols=True)
     for epoch in epoch_bar:
-        tr_loss, tr_loss_all = train_one_epoch(model, dl_tr, optimizer, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
+        tr_loss_mean, tr_loss_all = train_one_epoch(model, dl_tr, optimizer, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
 
-        # ---- FINAL RETRAIN MODE (NO VAL) ----
-        if nestedcv_outer_test:
-            epoch_bar.set_postfix(train_loss=f"{tr_loss:.4f}")
-            append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
-            continue
+        # ---- Inference on training (or inner test of validation) ----
+        metrics, _ = inference(model, dl_va, args.device)
+        eval_metric = metrics.get("eval_metric", float("nan"))
 
-        # ---- CV MODE: VALIDATE ----
-        metrics = eval_epoch(model, dl_va, args.device)
-        val_metric = metrics.get("val_metric", float("nan"))
-
-        # ---- tqdm postfix ----
-        epoch_bar.set_postfix(train_loss=f"{tr_loss:.4f}",
-                              AUC=f"{metrics.get('auc', float('nan')):.3f}", ACC=f"{metrics.get('acc', float('nan')):.3f}",
-                              MAE=f"{metrics.get('mae', float('nan')):.2f}", RMSE=f"{metrics.get('rmse', float('nan')):.2f}",
-                              R2=f"{metrics.get('r2', float('nan')):.3f}", val_metric=f"{val_metric:.3f}")
-
-        if scheduler is not None and np.isfinite(val_metric): scheduler.step(val_metric)
+        if not train_only and 'few-shot' not in fold_name and np.isfinite(eval_metric): scheduler.step(eval_metric) # no scheduler when test only and fine-tunning few shots
 
         # ---- Optuna report, if callback provided ----
-        if on_epoch_end is not None: on_epoch_end(int(fold_name.split('-k')[-1]) if 'trial' in fold_name else 0, epoch, val_metric)
+        if optuna_report is not None: optuna_report(int(fold_name.split('-k')[-1]) if 'trial' in fold_name else 0, epoch, eval_metric)
 
-        # ---- CSV logging ----
-        append_epoch_metrics_csv(csv_path, epoch, {**metrics, "train_loss": tr_loss})
-        append_epoch_metrics_csv(csv_loss_path, epoch, tr_loss_all)
+        # ---- save training loss and evaluation metrics (used to early stop) ----
+        append_metrics_csv(path_list['train_loss_csv'], {"epoch": epoch, **tr_loss_all}, mode='row')
+        append_metrics_csv(path_list['train_eval_csv'], {"epoch": epoch, "train_loss": tr_loss_mean, **metrics}, mode='row')
 
+        epoch_bar.set_postfix(train_loss=f"{tr_loss_mean:.4f}", eval_metric=f"{eval_metric:.3f}")
+        
         # ---- Early stopping + checkpoint ----
-        if es is not None:
-            stop, improved = es.step(val_metric, epoch)
+        if not train_only:
+            stop, improved = es.step(eval_metric, epoch)
             if improved:
                 best_epoch = es.best_epoch
-                save_checkpoint(model, ckpt_path)
+                save_checkpoint(model, path_list['ckpt'])
             if stop:
                 tqdm.write(
                     f"[{fold_name}] Early stopping at epoch {epoch} "
@@ -137,15 +141,20 @@ def train_model(model, dl_tr, dl_va, *, args, optimizer, scheduler, fold_name, p
 
 
 def _make_outfolder_fold(output_path, fold_name):
-    fold_dir = os.path.join(output_path, fold_name)
-    ckpt_dir = os.path.join(fold_dir, "checkpoints")
+    output_fold_dir = os.path.join(output_path, fold_name)
+    ckpt_dir = os.path.join(output_fold_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    csv_path = os.path.join(fold_dir, "metrics_per_epoch.csv")
-    csv_loss_path = os.path.join(fold_dir, "trainning_loss_per_epoch.csv")
-    path_list = [csv_path, csv_loss_path, os.path.join(ckpt_dir, f"{fold_name}_best.pt")]
+    train_eval_csv_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.csv")
+    train_loss_csv_path = os.path.join(output_fold_dir, "trainning_loss_allsubjects_per_epoch.csv")
+    train_eval_png_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.csv")
+    test_eval_pkl_path = os.path.join(output_fold_dir, "train-test_preds-metrics_thisfold.csv")
 
-    return fold_dir, path_list
+    path_list = {'train_eval_csv': train_eval_csv_path, 'train_loss_csv': train_loss_csv_path, 
+                 'train_eval_png': train_eval_png_path, 'train-test_eval_pkl': test_eval_pkl_path,
+                 'ckpt': os.path.join(ckpt_dir, f"{fold_name}_best.pt")}
+
+    return output_fold_dir, path_list
 
 
 def get_stratify_labels(df: pd.DataFrame, cols):

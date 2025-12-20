@@ -1,6 +1,9 @@
 from src.warnings import ignore_warnings
 ignore_warnings()
 
+import os
+import pandas as pd
+
 from src.params import parse_arguments
 from src.utils import set_seed, make_splits, hold_out_set, save_train_test_subjects, clone_args
 from src.data import build_master_table
@@ -39,23 +42,28 @@ def main(args):
         print(best_args_fixed)
 
         print("\nRetraining on FULL TRAIN pool with fixed epochs (no early stop), then one-shot TEST eval…")
-        final_metrics = run_fold(df_train, df_test, best_args_fixed, fold_name="nestedcv-outer-test",
-            use_early_stop=False, use_scheduler=False, final_retrain=True)
+        metrics_te, df_result_te = run_fold(df_train, df_test, best_args_fixed, fold_name="nestedcv-outer-test")
 
-        print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
-              f"ACC={final_metrics.get('acc'):.3f} MAE={final_metrics.get('mae'):.2f} "
-              f"RMSE={final_metrics.get('rmse'):.2f} R2={final_metrics.get('r2'):.3f}")
+        print(f"\nHypertune OUTER TEST: AUC={metrics_te.get('auc'):.3f} "
+              f"ACC={metrics_te.get('acc'):.3f} MAE={metrics_te.get('mae'):.2f} "
+              f"RMSE={metrics_te.get('rmse'):.2f} R2={metrics_te.get('r2'):.3f}")
 
     else: # this is just to test the model, not valid for publication
-        print('NOOO tuning...')
+        print('NOOO tuning... CV only...')
         # --- Direct CV (no tuning) on train_pool to gauge stability ---
-        # kfold_cv(df_train, stratify_labels_train, args)
+        # model = kfold_cv(df_train, stratify_labels_train, args)
         # 2 split only: single final train vs test
-        final_metrics = run_fold(df_train, df_test, args, fold_name="train-test-split")
-        print(f"\nOUTER TEST: AUC={final_metrics.get('auc'):.3f} "
-              f"ACC={final_metrics.get('acc'):.3f} MAE={final_metrics.get('mae'):.2f} "
-              f"RMSE={final_metrics.get('rmse'):.2f} R2={final_metrics.get('r2'):.3f}")
+        metrics_te, df_result_te = run_fold(df_train, df_test, args, fold_name="train-test-split")
+        print(f"\nCV test set: AUC={metrics_te.get('auc'):.3f} "
+              f"ACC={metrics_te.get('acc'):.3f} MAE={metrics_te.get('mae'):.2f} "
+              f"RMSE={metrics_te.get('rmse'):.2f} R2={metrics_te.get('r2'):.3f}")
 
+    # Save Results
+    test_folder = os.path.join(args.output_path, 'validation', args.dataset)
+    os.makedirs(test_folder, exist_ok=True)
+    df_result_te.to_csv(f'{test_folder}/Test_{args.dataset}_results.csv', index=False)
+    pd.DataFrame(metrics_te).to_csv(f'Test_{args.dataset}_metrics.csv', index=False)
+    
     print('DONE!')
 
 if __name__ == "__main__":

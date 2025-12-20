@@ -5,19 +5,36 @@ import torch.nn as nn
 import nibabel as nib
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from monai.visualize.occlusion_sensitivity import OcclusionSensitivity
+from scipy.ndimage import gaussian_gradient_magnitude
 from monai.visualize.class_activation_maps import GradCAM
+from monai.visualize.occlusion_sensitivity import OcclusionSensitivity
 
 
 def run_visualization(model, loader, device, output_path, vis_name="gradcam",
-                      vis_kwargs=None, affine_fn=None): # optional: get affine per subject
+                      vis_kwargs=None, affine_fn=None, # optional: get affine per subject
+                      vis_norm="zscore", skull_suppress_pct=20,      # PET intensity percentile
+                      use_pseudo_surface=False, pseudo_surface_sigma=1.0, pseudo_surface_pct=90):
     """
-    Generic runner for per-case + group-level visualization maps.
+    Run volumetric explainability visualizations for 3D PET models.
+
+    For each subject, this function computes a voxel-wise attribution map
+    (e.g., Grad-CAM or occlusion) in model input space, suppresses background
+    and skull-driven activations using PET intensity thresholds, and saves
+    subject-level and group-average results.
+
+    Outputs include:
+      - Volumetric NIfTI attribution maps
+      - Maximum-intensity-projection (MIP) overlays on PET
+      - Optional PET-derived pseudo-surface visualizations (approximate,
+        gradient-based; not anatomical surfaces)
+
+    All visualizations are performed in the model input (preprocessed PET)
+    space without registration to standard templates.
     """
     VIS_REGISTRY = {
-    "gradcam": gradcam_vis_fn,
-    "occlusion": occlusion_vis_fn,
-    }
+        "gradcam": gradcam_vis_fn,
+        "occlusion": occlusion_vis_fn,
+        }
     vis_fn = VIS_REGISTRY[vis_name]
     vis_kwargs = vis_kwargs or {}
 
@@ -26,30 +43,39 @@ def run_visualization(model, loader, device, output_path, vis_name="gradcam",
 
     vis_sum = None
     n = 0
-    for i, (x, _, _, extra, pid) in enumerate(loader):
+    for x, _, _, extra, pid in loader:
         x = x.to(device)
         extra = extra.to(device)
         
-        B = x.shape[0]
-
-        for b in range(B):
-            xb = x[b:b+1]                          # [1, C, D, H, W]
+        for b in range(x.shape[0]):
+            xb = x[b:b+1] # [1, C, D, H, W]
             extrab = extra[b:b+1] if extra is not None else None
             pid_b = pid[b]
 
+            # visualize
             heat = vis_fn(model=model, x=xb, extra=extrab, **vis_kwargs)  # [D,H,W]
             assert heat.ndim == 3
-            mask = (xb != 0).any(dim=1)[0].float().cpu().numpy()
-            heat = heat * mask  # mask out background
+            img_np = xb[0, 0].detach().cpu().numpy()  # (D,H,W)
 
+            # PET-based brain & skull suppression
+            brain_mask = img_np > np.percentile(img_np[img_np > 0], skull_suppress_pct)
+            heat = heat * brain_mask
+
+            if vis_norm is not None: heat = normalize_cam(heat, vis_norm)
+
+            # save to NIFTI
             affine = affine_fn(pid_b) if affine_fn else np.eye(4)
+            nib.save(nib.Nifti1Image(heat.astype(np.float32), affine),
+                     os.path.join(vis_dir, f"{pid_b}_{vis_name}.nii.gz"))
 
-            # per-case outputs
-            nii_path = os.path.join(vis_dir, f"{pid_b}_{vis_name}.nii.gz")
-            png_path = os.path.join(vis_dir, f"{pid_b}_{vis_name}.png")
-
-            nib.save(nib.Nifti1Image(heat.astype(np.float32), affine), nii_path)
-            save_png_slices(heat, png_path)
+            # MIP visualization
+            save_mip_png(img_np, heat, os.path.join(vis_dir, f"{pid_b}_{vis_name}_mip.png"))
+            
+            # Pseudo-surface visualization (no T1w available, no affine)
+            if use_pseudo_surface:
+                shell = pet_pseudo_surface(img_np, sigma=pseudo_surface_sigma, pct=pseudo_surface_pct)
+                shell_cam = heat * shell
+                save_mip_png(img_np, shell_cam, os.path.join(vis_dir, f"{pid_b}_{vis_name}_pseudo_surface.png"))
 
             vis_sum = heat if vis_sum is None else vis_sum + heat
             n += 1
@@ -58,7 +84,11 @@ def run_visualization(model, loader, device, output_path, vis_name="gradcam",
     vis_avg = vis_sum / n
     nib.save(nib.Nifti1Image(vis_avg.astype(np.float32), np.eye(4)),
              os.path.join(vis_dir, f"group_average_{vis_name}.nii.gz"))
-    save_png_slices(vis_avg,os.path.join(vis_dir, f"group_average_{vis_name}.png"))
+    save_mip_png(img_np, vis_avg, os.path.join(vis_dir, f"group_average_{vis_name}_mip.png"))
+
+    if use_pseudo_surface:
+        shell = pet_pseudo_surface(img_np, pseudo_surface_sigma, pseudo_surface_pct)
+        save_mip_png(img_np, vis_avg * shell, os.path.join(vis_dir, f"group_average_{vis_name}_pseudo_surface.png"))
 
 
 def gradcam_vis_fn(model, x, extra, target_layer=None, normalize=True, upsample_mode="trilinear"):
@@ -104,54 +134,46 @@ def occlusion_vis_fn(model, x, extra, **kwargs):
     return heat
 
 
+def normalize_cam(cam, mode="zscore", eps=1e-6):
+    mask = cam > 0
+    if not np.any(mask):
+        return cam
 
-def save_png_slices(vis_np, img_np, out_path, k=5, cmap="hot", alpha=0.4):
-    """
-    Save a grid of k slices for axial / coronal / sagittal views.
-    """
-    assert vis_np.shape == img_np.shape
-    assert k % 2 == 1, "k must be odd to include center slice"
+    vals = cam[mask]
 
-    D, H, W = vis_np.shape
-    z_idxs = _sample_slices(D, k)
-    y_idxs = _sample_slices(H, k)
-    x_idxs = _sample_slices(W, k)
+    if mode == "zscore":
+        cam = (cam - vals.mean()) / (vals.std() + eps)
+        cam[cam < 0] = 0
+    elif mode == "percentile":
+        lo, hi = np.percentile(vals, [80, 99])
+        cam = np.clip((cam - lo) / (hi - lo + eps), 0, 1)
 
-    fig, axes = plt.subplots(k, 3, figsize=(9, 3 * k))
+    return cam
 
-    for i in range(k):
-        axes[i, 0].imshow(img_np[z_idxs[i], :, :], cmap="gray")
-        axes[i, 0].imshow(vis_np[z_idxs[i], :, :], cmap=cmap, alpha=alpha)
-        axes[i, 0].set_ylabel(f"z={z_idxs[i]}")
-        axes[i, 0].set_title("Axial" if i == 0 else "")
-        axes[i, 0].axis("off")
 
-        axes[i, 1].imshow(img_np[:, y_idxs[i], :], cmap="gray")
-        axes[i, 1].imshow(vis_np[:, y_idxs[i], :], cmap=cmap, alpha=alpha)
-        axes[i, 1].set_title("Coronal" if i == 0 else "")
-        axes[i, 1].axis("off")
+def save_mip_png(img, cam, out_png, cmap="hot"):
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-        axes[i, 2].imshow(img_np[:, :, x_idxs[i]], cmap="gray")
-        axes[i, 2].imshow(vis_np[:, :, x_idxs[i]], cmap=cmap, alpha=alpha)
-        axes[i, 2].set_title("Sagittal" if i == 0 else "")
-        axes[i, 2].axis("off")
+    views = [(img.max(0), cam.max(0), "Axial"),
+             (img.max(1), cam.max(1), "Coronal"),
+             (img.max(2), cam.max(2), "Sagittal")]
+
+    for ax, (im, hm, title) in zip(axes, views):
+        ax.imshow(im, cmap="gray")
+        ax.imshow(hm, cmap=cmap, alpha=0.6)
+        ax.set_title(title)
+        ax.axis("off")
 
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_png, dpi=150)
     plt.close()
 
 
-def _sample_slices(n, k=5):
+def pet_pseudo_surface(img, sigma=1.0, pct=90):
     """
-    Sample k slice indices from range [0, n-1], always including center.
+    PET-derived cortical shell proxy using gradient magnitude.
     """
-    assert k % 2 == 1, "k must be odd to include center"
-    center = n // 2
-    half = k // 2
-
-    # evenly spaced offsets
-    max_offset = min(center, n - center - 1)
-    offsets = np.linspace(-max_offset, max_offset, k).astype(int)
-
-    idxs = np.clip(center + offsets, 0, n - 1)
-    return idxs
+    grad = gaussian_gradient_magnitude(img, sigma=sigma)
+    thr = np.percentile(grad[grad > 0], pct)
+    shell = grad >= thr
+    return shell.astype(np.float32)

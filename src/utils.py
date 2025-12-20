@@ -93,14 +93,38 @@ def compute_smooth_sigma_vox(voxel_sizes_mm: tuple[float, float, float], fwhm_cu
     vx, vy, vz = voxel_sizes_mm
     return (sigma_mm / vx, sigma_mm / vy, sigma_mm / vz)
 
-def append_metrics_row(csv_path: str, row: dict):
+
+def append_metrics_csv(csv_path: str, data: dict, mode: str = "row"):
+    """
+    Append metrics to a CSV file using pandas.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to CSV file.
+    data : dict
+        Metrics to append.
+    mode : {"row", "column"}
+        - "row": append one experiment per row (recommended)
+        - "column": append one experiment per column
+    """
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    write_header = not os.path.exists(csv_path)
-    with open(csv_path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            w.writeheader()
-        w.writerow(row)
+
+    if mode == "row":
+        df_new = pd.DataFrame([data])  # one row
+        if os.path.exists(csv_path):
+            df_old = pd.read_csv(csv_path)
+            df = pd.concat([df_old, df_new], ignore_index=True)
+    elif mode == "column":
+        df_new = pd.DataFrame.from_dict(data, orient="index", columns=["value"])
+        if os.path.exists(csv_path):
+            df_old = pd.read_csv(csv_path, index_col=0)
+            df = pd.concat([df_old, df_new], axis=1)
+    else:
+        raise ValueError("mode must be 'row' or 'column'")
+    if not os.path.exists(csv_path): df = df_new
+    df.to_csv(csv_path)
+
 
 def combine_metrics_for_minimize(m: dict) -> float:
     """
@@ -163,6 +187,7 @@ def save_train_test_subjects(df_train, df_test, output_path, savename):
     df_train.to_csv(os.path.join(output_path, f'{savename}_training-set.csv'))
     df_test.to_csv(os.path.join(output_path, f'{savename}_testing-set.csv'))
 
+
 def build_model_from_args(args, device=None, n_classes: int | None = None):
     """
     Dynamically instantiate a model by name from models.py using args.model.
@@ -201,8 +226,6 @@ def build_model_from_args(args, device=None, n_classes: int | None = None):
     if n_classes is not None:
         if "num_classes" in allowed and "num_classes" not in params:
             params["num_classes"] = n_classes
-        if "out_channels" in allowed and "out_channels" not in params:
-            params["out_channels"] = n_classes
 
     # Instantiate:  Build + move
     model = ModelCls(**params)
@@ -218,22 +241,6 @@ def build_model_from_args(args, device=None, n_classes: int | None = None):
     return model
 
 
-def append_epoch_metrics_csv(csv_path: str, epoch: int, metrics: dict):
-    """
-    Append one row per epoch to a CSV using pandas.
-    If file does not exist, create it with a header.
-    """
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-
-    row = {"epoch": epoch, **metrics}
-    df_row = pd.DataFrame([row])
-
-    if not os.path.exists(csv_path):
-        df_row.to_csv(csv_path, index=False)
-    else:
-        df_row.to_csv(csv_path, mode="a", header=False, index=False)
-
-
 def plot_metrics_from_csv(csv_path: str, out_png: str):
     """
     Plot per-epoch validation metrics (AUC/ACC and/or MAE/RMSE/R2).
@@ -244,12 +251,7 @@ def plot_metrics_from_csv(csv_path: str, out_png: str):
     if df.empty or "epoch" not in df.columns: return
 
     # Define metric families and keep only those present
-    cls_defs = [("auc", "AUC"), ("acc", "ACC")]
-    reg_defs = [("mae", "MAE"), ("rmse", "RMSE"), ("r2", "R2")]
-    cls = [(k, lbl) for k, lbl in cls_defs if k in df.columns]
-    reg = [(k, lbl) for k, lbl in reg_defs if k in df.columns]
-
-    if not cls and not reg: return  # nothing to plot
+    defs = [("eval_metric", "Evaluation_metric"), ("train_loss", "Training loss")]
 
     plt.figure(figsize=(10, 6), dpi=300)
     ax1 = plt.gca()
@@ -261,10 +263,10 @@ def plot_metrics_from_csv(csv_path: str, out_png: str):
     #    _plot_lines(ax2, x, df, reg, "Regression")
     #else:
     #    _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
-    _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
+    _plot_lines(ax1, x, df, defs)
 
     ax1.set_xlabel("Epoch")
-    plt.title("Validation metrics per epoch")
+    plt.title("Validation metrics vs training loss per epoch")
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     plt.savefig(out_png, dpi=300)
@@ -276,85 +278,3 @@ def _plot_lines(ax, x, df, metrics, ylabel):
     ax.set_ylabel(ylabel)
     if metrics:
         ax.legend(loc="best")
-
-
-### Runtime estimation
-def estimate_runtime(model, loader, device, *,
-        N: int, K: int, B: int, E: int, T: int = 0, # number of training samples (after hold-out), n_splits, batch size (for training), full epochs for final runs, Optuna trials (0 => skip tuning estimate)
-        E_proxy: int = 8, measure_batches: int = 32):  #proxy epochs during tuning   
-
-    """
-    Benchmarks sec/step on your machine and projects total runtime.
-
-    Returns a dict with seconds for:
-      - sec_per_step
-      - per_epoch
-      - cv_total
-      - tune_total (0 if T==0)
-      - final_train_total
-    """
-    # 1) micro-benchmark (forward-only; includes I/O + transforms)
-    sec_per_step = _benchmark_seconds_per_step(model, loader, device, warmup_batches=8, measure_batches=measure_batches)
-
-    # 2) steps per epoch for one fold (train portion size ~ N*(K-1)/K)
-    train_samples_per_fold = N * (K - 1) / K
-    steps_per_epoch_fold = math.ceil(train_samples_per_fold / max(B, 1))
-    time_per_epoch = steps_per_epoch_fold * sec_per_step
-
-    # 3) projections
-    total_time_cv = K * E * time_per_epoch                         # K-fold full training (no tuning)
-    total_time_tune = T * K * E_proxy * time_per_epoch if T > 0 else 0.0
-
-    steps_full = math.ceil(N / max(B, 1))                          # full train pool (no CV) for lockbox run
-    time_final_train = E * steps_full * sec_per_step
-
-    # 4) pretty print
-    print("\n=== Runtime estimate (based on live benchmark) ===")
-    print(f"sec/step           : {sec_per_step:.4f} s")
-    print(f"steps/epoch (fold) : {steps_per_epoch_fold}")
-    print(f"time/epoch (fold)  : {_fmt_hms(time_per_epoch)}")
-    print(f"K-fold (K={K}, E={E}): {_fmt_hms(total_time_cv)}")
-    if T > 0:
-        print(f"Tuning (T={T}, proxy_epochs={E_proxy}, K={K}): {_fmt_hms(total_time_tune)}")
-    print(f"Final train on N={N} (E={E}): {_fmt_hms(time_final_train)}")
-    print("==================================================\n")
-
-
-def _benchmark_seconds_per_step(model, loader, device, warmup_batches=8, measure_batches=32):
-    model.eval()
-    it = iter(loader)
-    # warmup (no grad)
-    with torch.no_grad():
-        for _ in range(min(warmup_batches, len(loader))):
-            x, *_ = next(it)
-            x = x.to(device, non_blocking=True)
-            _ = model(x)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-    # measure
-    times = []
-    with torch.no_grad():
-        for _ in range(min(measure_batches, len(loader))):
-            t0 = time.perf_counter()
-            try:
-                x, *_ = next(it)
-            except StopIteration:
-                it = iter(loader); x, *_ = next(it)
-            x = x.to(device, non_blocking=True)
-            _ = model(x)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            times.append(time.perf_counter() - t0)
-
-    return (sum(times) / len(times)) if times else float("inf")
-
-
-def _fmt_hms(seconds: float) -> str:
-    if not math.isfinite(seconds): return "n/a"
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 24)
-    if d:  return f"{d}d {h}h {m}m"
-    if h:  return f"{h}h {m}m {s}s"
-    if m:  return f"{m}m {s}s"
-    return f"{s}s"

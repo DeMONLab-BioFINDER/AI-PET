@@ -1,6 +1,7 @@
 # src/train.py
 import torch
 import numpy as np
+import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -41,30 +42,21 @@ def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_r
 
 
 @torch.no_grad()
-def eval_epoch(model, loader, device):
+def inference(model, loader, device):
     probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, loader, device)
 
     metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
+    # es_metric <- val_metric
 
-    # robust combined score proxy (only include what exists)
-    parts = []
     if any_cls: 
-        if np.isfinite(metrics["auc"]): parts.append(metrics["auc"])
-        if np.isfinite(metrics["acc"]): parts.append(metrics["acc"])
+        df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 
+                                  'pred':np.concatenate(preds, axis=0),
+                                  'prob':np.concatenate(probs, axis=0)})
     if any_reg:
-        #yreg = yreg.detach().cpu().numpy() if isinstance(yreg, torch.Tensor) else np.asarray(yreg)
-        yreg = np.concatenate(yreg)
-        mae_ref = np.median(np.abs(yreg - np.median(yreg)))
-        if not np.isfinite(mae_ref) or mae_ref <= 1e-6:
-            mae_ref = max(np.std(yreg), 1e-6)
-        mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan
-        r2_good  = metrics["r2"] if np.isfinite(metrics["r2"]) else np.nan
-        parts.append(mae_good)
-        parts.append(r2_good)
+        df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0),
+                                  'pred':np.concatenate(cents, axis=0)})
 
-    metrics["val_metric"] = float(np.sum(parts)) if parts else 0.0  # never NaN
-
-    return metrics
+    return metrics, df_result
 
 
 @torch.no_grad()
@@ -113,8 +105,7 @@ def evals(model, loader, device):
 
 def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
     
-    metrics = {"auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan, "val_metric": 0.0} #"val_loss": 0.0, 
-
+    metrics = {"auc": np.nan, "acc": np.nan, "mae": np.nan, "rmse": np.nan, "r2": np.nan, "eval_metric": 0.0} #"val_loss": 0.0, 
     if any_cls:
         ycls  = np.concatenate(ycls)
         preds = np.concatenate(preds)
@@ -142,6 +133,7 @@ def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
             else:
                 metrics["auc"] = float(roc_auc_score(ycls, probs, multi_class="ovr", average="macro", labels=labels))
         metrics["acc"] = float(accuracy_score(ycls, preds))
+        metrics['eval_metric'] = np.nansum([metrics["auc"], metrics["acc"]])
     if any_reg:
         cents = np.concatenate(cents)
         yreg  = np.concatenate(yreg)
@@ -154,6 +146,12 @@ def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
         metrics["mae"]  = float(mean_absolute_error(yreg, cents))
         metrics["rmse"] = float(root_mean_squared_error(yreg, cents))
         metrics["r2"]   = float(r2_score(yreg, cents))
+
+        mae_ref = np.median(np.abs(yreg - np.median(yreg))) # Reference scale for MAE (robust to outliers), Median Absolute Deviation
+        if not np.isfinite(mae_ref) or mae_ref <= 1e-6: # Fallback if targets are constant or numerically unstable
+            mae_ref = max(np.std(yreg), 1e-6)
+        mae_good = 1.0 - np.clip(metrics["mae"] / mae_ref, 0.0, 1.0) if np.isfinite(metrics["mae"]) else np.nan # Convert MAE into a "goodness" score in [0, 1]
+        metrics['eval_metric'] = np.nansum([mae_good, metrics["r2"]])
 
     return metrics
 

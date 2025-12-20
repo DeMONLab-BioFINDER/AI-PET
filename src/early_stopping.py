@@ -7,8 +7,8 @@ from dataclasses import dataclass
 @dataclass
 class EarlyStopper:
     mode: str = "max"          # "max" for AUC / combined-reg metric; "min" for MAE/RMSE
-    patience: int = 10
-    min_delta: float = 1e-2
+    patience: int = 7
+    min_delta: float = 1e-3
     best: float = None
     bad_epochs: int = 0
     best_epoch: int = 0

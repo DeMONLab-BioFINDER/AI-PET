@@ -40,13 +40,13 @@ def objective(trial, base_args, df_clean, splits, model_name):
     scores = []
     reporter = PruningReporter(trial)  # <— stateful callback
     for i, (tr_idx, va_idx) in enumerate(splits[:proxy_folds], start=1):
-        fold_name = f"trial{trial.number}-k{i}"
+        fold_name = f"hypertune-trial{trial.number}-k{i}"
         train_df = df_clean.iloc[tr_idx].reset_index(drop=True)
         val_df   = df_clean.iloc[va_idx].reset_index(drop=True)
 
         # run one fold (your run_fold already logs/plots inside its own folder)
-        m = run_fold(train_df, val_df, targs, fold_name=fold_name, on_epoch_end=reporter)
-        val = combine_metrics_for_minimize(m)
+        m, r = run_fold(train_df, val_df, targs, fold_name=fold_name, optuna_report=reporter)
+        val = combine_metrics_for_minimize(m) # not logging r (df_results_te) because too much for hypertune
         scores.append(val)
 
         # pruning support (report intermediate)

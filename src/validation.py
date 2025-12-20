@@ -1,18 +1,19 @@
 # finetune.py
-from scripts.src.cv import run_fold
 from src.warnings import ignore_warnings
 ignore_warnings()
 
 import os
 import copy
 import torch
+import pickle
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 from sklearn.model_selection import StratifiedShuffleSplit
 
 from src.data import build_master_table, get_transforms, get_loader
-from src.train import train_model, evals, compute_metrics
+from src.train import inference
+from src.cv import train_model
 from src.utils import compute_smooth_sigma_vox, build_model_from_args, load_best_checkpoint
 
 import torch.multiprocessing as mp
@@ -45,7 +46,7 @@ def run_few_shots(args, df, tfm, base_model, targets_list):
         df_ids = pd.DataFrame(all_fs_ids)
 
         # ----- FEW-SHOT -----
-        metrics, df_result = few_shots(base_model, df_fs, df_eval, tfm, args, it)
+        metrics, df_result = few_shots(base_model, df_fs, df_eval, tfm, args, it) # results on test set
         print("metrics:", metrics)
 
         # ----- COLLECT -----
@@ -59,34 +60,22 @@ def run_few_shots(args, df, tfm, base_model, targets_list):
     return df_metrics, df_results, df_ids
 
 
-def inference(model, dl_eval, targets, device):
-    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, dl_eval, device)
-    metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
-
-    if "visual_read" in targets.split(","):
-        df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 'pred':np.concatenate(preds, axis=0), 'prob':np.concatenate(probs, axis=0)})
-    elif 'CL' in targets.split(","):
-        df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0), 'pred':np.concatenate(cents, axis=0)})
-
-    return metrics, df_result
-
-
 def few_shots(base_model, df_fs, df_eval, tfm, args, it):
     # loaders
-    dl_fs_tr = get_loader(df_fs, tfm, args, augment=True, shuffle=True)
-    dl_fs_va = get_loader(df_fs, tfm, args, augment=False, shuffle=False)
-    dl_eval  = get_loader(df_eval, tfm, args, augment=False, shuffle=False)
+    dl_fs_tr = get_loader(df_fs, tfm, args, batch_size=max(1, args.batch_size // 2), augment=True, shuffle=True)
+    dl_fs_va = get_loader(df_fs, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
+    dl_eval  = get_loader(df_eval, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
 
     model = copy.deepcopy(base_model) # clone model (important!)
     # freeze backbone
     model = freeze_all_but_last_k(model, args.unfreeze_layers)
 
     # finetune
-    model = finetune(model, dl_fs_tr, dl_fs_va, it, args, fold_name=f"fewshot-{args.few_shot}_iter-{args.few_shot_iterations}-{it}")
+    model, save_path = finetune(model, dl_fs_tr, dl_fs_va, it, args, fold_name=f"fewshot-{args.few_shot}_iter-{args.few_shot_iterations}-{it}")
 
     # evaluate
-    metrics, df_result = inference(model, dl_eval, args.targets, args.device)
-
+    metrics, df_result = inference(model, dl_eval, args.device)
+    pickle.dump([metrics, df_result], open(f"{save_path}_inference_testset.pkl", "wb"))
     return metrics, df_result
 
 
@@ -94,23 +83,19 @@ def finetune(model, dl_tr, dl_va, it, args, fold_name="few-shots"):
     '''
     Finetune the given model using the few-shot training and validation on the same set of dataloaders.
     '''
-    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
-                            lr=args.lr, weight_decay=args.weight_decay,)
-    # sched = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=3, min_lr=1e-6) # often off in finetune
-
+    
     finetune_path = os.path.join(args.output_path, f"fewshot-{args.few_shot}") ### ! Same as in run_few_shots()
     save_path = f"{finetune_path}/iter-{args.few_shot_iterations}-{it}"
-    path_list = [f"{save_path}_metrics_per_epoch.csv", f"{save_path}_trainning_loss_per_epoch.csv", f"{save_path}_finetuned_best.pt"]
+    path_list = [f"{save_path}_training_metrics_per_epoch.csv", f"{save_path}_trainning_loss_allfinetunesubjects_per_epoch.csv", f"{save_path}_finetuned_best.pt"]
 
-    model, _ = train_model(model, dl_tr, dl_va, args=args, optimizer=opt,
-                                    scheduler=None, fold_name=fold_name, path_list=path_list)
+    model, _ = train_model(model, dl_tr, dl_va, args=args, fold_name=fold_name, path_list=path_list)
 
     if os.path.exists(path_list[2]):
         model = load_best_checkpoint(model, ckpt_path=path_list[2], device=args.device)
     else:
-        print("⚠ No finetune checkpoint found, using last-epoch weights")
+        print("! No finetune checkpoint found, using last-epoch weights")
 
-    return model
+    return model, save_path
 
 
 def load_validation_data(args):
@@ -167,7 +152,7 @@ def load_preatrained_model(args, df) -> torch.nn.Module:
 
     model = build_model_from_args(args, device=args.device, n_classes=n_classes)
 
-    ckpt = os.path.join(args.best_model_folder, "outer-test/checkpoints/best.pt")
+    ckpt = os.path.join(args.best_model_folder, "train-test-split/checkpoints/train-test-split_best.pt")
     print(f"Loading pretrained model: {ckpt}")
     sd = torch.load(ckpt, map_location=args.device, weights_only=True)
 
