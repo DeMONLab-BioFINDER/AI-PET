@@ -23,6 +23,7 @@ def parse_arguments():
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
     parser.add_argument("--image_shape", nargs=3, type=int, default=[128,128,128], help="Input image shape (x,y,z) after resampling, can be tuned by Optuna")
     parser.add_argument("--input_cl", type=str, default=None, help="Name of extra input CL used to plug in at the last fully connected layer, should be the column name in demo.csv e.g. CL, CL_pred")
+    parser.add_argument("--extra_global_feats", type=str, default="p95,std,frac_hi", help="Extra gloabl input used to plug in at the last fully connected layer. e.g. p95,std,frac_hi")
     
     # Model args
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -35,6 +36,8 @@ def parse_arguments():
     parser.add_argument("--epochs", type=int, default=200) # true model should start with 30 
     parser.add_argument("--loss_w_cls", type=float, default=1.0)
     parser.add_argument("--loss_w_reg", type=float, default=1.0)
+    parser.add_argument("--reg_loss", type=str, default='mse', choices=["mse","smoothl1"], help="regression loss name")
+    parser.add_argument("--smoothl1_beta", type=float, default=10, help="regression smooth L1 loss beta, CL units that is acceptable")
     parser.add_argument("--num_workers", type=int, default=8) # 8 on the cluster, 2 on mac
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to load (optional)")
     parser.add_argument("--amp", type=bool, default=True, help="Use automatic mixed precision if CUDA is available.")

@@ -107,7 +107,9 @@ def train_model(model, dl_tr, dl_va, *, args, fold_name, path_list, optuna_repor
     best_epoch = 0
     epoch_bar = tqdm(range(1, args.epochs + 1), desc=f"{fold_name} epochs", position=1, leave=False, dynamic_ncols=True)
     for epoch in epoch_bar:
-        tr_loss_mean, tr_loss_all = train_one_epoch(model, dl_tr, optimizer, scaler, args.device, args.loss_w_cls, args.loss_w_reg)
+        tr_loss_mean, tr_loss_all = train_one_epoch(model=model, loader=dl_tr, opt=optimizer, scaler=scaler,
+                                                    device=args.device, loss_w_cls=args.loss_w_cls, loss_w_reg=args.loss_w_reg,
+                                                    reg_loss=args.reg_loss, smoothl1_beta=args.smoothl1_betes)
 
         # ---- Inference on training (or inner test of validation) ----
         metrics, _ = inference(model, dl_va, args.device)

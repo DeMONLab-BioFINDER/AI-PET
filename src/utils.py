@@ -200,13 +200,20 @@ def build_model_from_args(args, device=None, n_classes: int | None = None):
     # Defaults from args (common across your models)
     defaults = {"in_channels": getattr(args, "in_channels", 1),
                 "widths": tuple(getattr(args, "widths", (32, 64, 128, 256))),
-                "dropout": getattr(args, "dropout", 0.3),
-            }
+                "dropout": getattr(args, "dropout", 0.3)}
     
-    if hasattr(args, "input_cl") and args.input_cl is not None:
-        defaults["extra_dim"] = 1
-    else:
-        defaults["extra_dim"] = 0
+    extra_dim = 0
+    # scalar CL input
+    if getattr(args, "input_cl", None) is not None:
+        extra_dim += 1
+        print('add extra input CL to the last FC layer')
+    # global image-derived features
+    if getattr(args, "extra_global_feats", None):
+        # expect comma-separated string: "p95,std,frac_hi"
+        feats = [f for f in args.extra_global_feats.split(",") if f.strip()]
+        extra_dim += len(feats)
+        print(f'add extra global input {args.extra_global_feats} to the last FC layer')
+    defaults["extra_dim"] = extra_dim
 
     # JSON-only model kwargs
     extra = {}

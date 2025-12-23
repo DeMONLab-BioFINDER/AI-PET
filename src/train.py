@@ -9,9 +9,8 @@ from typing import Any, Tuple, Optional
 from sklearn.metrics import roc_auc_score, accuracy_score, r2_score, mean_absolute_error, root_mean_squared_error, roc_curve, balanced_accuracy_score, f1_score, matthews_corrcoef
 
 
-def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_reg=1.0, output_loss=None):
+def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls, loss_w_reg, reg_loss, smoothl1_beta):
     model.train()
-    mse = nn.MSELoss()
     losses = []
 
     for x, y_cls, y_reg, extra, _ in tqdm(loader, desc="Train", leave=False):
@@ -25,13 +24,13 @@ def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls=1.0, loss_w_r
         if scaler is not None:
             with torch.cuda.amp.autocast():
                 loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
-                    loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg)
+                    loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
         else:
             loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
-                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, mse=mse)
+                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta)
             loss.backward()
             opt.step()
 
@@ -157,21 +156,26 @@ def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
 
 
 def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: torch.Tensor,
-                       y_reg: torch.Tensor, extra: torch.Tensor,
-                       *, loss_w_cls: float = 1.0, loss_w_reg: float = 1.0,
-                       mse: Optional[nn.Module] = None):
+                       y_reg: torch.Tensor, extra: torch.Tensor, loss_w_cls: float, loss_w_reg: float,
+                       reg_loss: str, smoothl1_beta: float): # "mse" or "smoothl1" # CL units
     """
-    Forward + weighted loss. Handles missing heads/targets.
+    Forward + weighted loss.
     Returns: (loss, (logit, cent))
     """
-    if mse is None: mse = nn.MSELoss()
+    # ---- regression loss selector ----
+    if reg_loss == "mse":
+        reg_criterion = nn.MSELoss()
+    elif reg_loss == "smoothl1":
+        reg_criterion = nn.SmoothL1Loss(beta=smoothl1_beta)
+    else:
+        raise ValueError(f"Unknown reg_loss: {reg_loss}")
 
     out = model(x, extra=extra)
     logit, cent, _ = unpack_model_outputs(out, y_reg)
 
     total = 0.0
     used_head = False
-
+    # ---- classification loss ----
     if (not y_cls.isnan().all()) and (loss_w_cls > 0) and (logit is not None):
         if logit.ndim == 2 and logit.shape[1] == 1:
             assert set(torch.unique(y_cls).tolist()) <= {0.0, 1.0}, "BCE requires binary {0,1} targets" # BCE path: targets must be float 0/1
@@ -182,12 +186,13 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: torch.Ten
             loss_cls = F.cross_entropy(logit, yl)
         total = total + loss_w_cls * loss_cls
         used_head = True
+    # ---- regression loss ----
     if (not y_reg.isnan().all()) and (loss_w_reg > 0) and (cent is not None):
-        total = total + loss_w_reg * mse(cent, y_reg)
+        loss_reg = reg_criterion(cent, y_reg)
+        total += loss_w_reg * loss_reg
         used_head = True
 
-    if not used_head: raise ValueError("No usable heads/targets: ensure your model returns the required outputs "
-            "(logit and/or cent) and corresponding loss weights/targets are set.")
+    if not used_head: raise ValueError("No usable heads/targets: check model outputs and loss weights.")
 
     return total, (logit, cent)
 

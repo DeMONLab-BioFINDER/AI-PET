@@ -208,7 +208,7 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
     g = torch.Generator()
     g.manual_seed(args.seed)
 
-    dataset = PETDataset(df, tfm, args.targets, input_cl=args.input_cl, augment=augment)
+    dataset = PETDataset(df, tfm, args.targets, input_cl=args.input_cl, extra_global_feats=args.extra_global_feats, augment=augment)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                         worker_init_fn=seed_worker, generator=g,
                         num_workers=args.num_workers, pin_memory=False)
@@ -295,11 +295,13 @@ class PETDataset(Dataset):
       - table columns: ["ID", "pet_path", "visual_read", "CL", ...]
       - transforms: a MONAI Compose returning a (1, D, H, W) Tensor/MetaTensor (float-like)
     """
-    def __init__(self, table: pd.DataFrame, transforms, targets, input_cl=None, augment: bool = False, dtype=torch.float32):
+    def __init__(self, table: pd.DataFrame, transforms, targets, input_cl=None, extra_global_feats: str | None = None, augment: bool = False, dtype=torch.float32):
         self.table = table.reset_index(drop=True)
         self.transforms = transforms
         self.targets = [t.strip() for t in targets.split(",") if t.strip()]
         self.input_cl = input_cl
+        self.extra_global_feats = ([f.strip() for f in extra_global_feats.split(",")]
+                                   if extra_global_feats is not None else [])
         self.augment = augment
         self.dtype = dtype
 
@@ -342,8 +344,43 @@ class PETDataset(Dataset):
         if 'CL' in self.targets:
             y_reg = torch.tensor([row["CL"]], dtype=torch.float32)
 
-        # extra info
-        extra_input = torch.tensor([float('nan')])
-        if self.input_cl is not None:
-            extra_input = torch.tensor([row[self.input_cl]], dtype=torch.float32)
+        # extra inputs
+        extras = []
+        # optional input CL
+        if self.input_cl is not None and pd.notna(row[self.input_cl]):
+            extras.append(torch.tensor([row[self.input_cl]], dtype=torch.float32))
+        # global PET features
+        if self.extra_global_feats:
+            feats = self.global_feats_from_x(x)
+            extras.append(feats)
+        
+        extra_input = torch.cat(extras) if extras else torch.tensor([float("nan")])
+
         return x, y_cls, y_reg, extra_input, row["ID"]
+    
+    def global_feats_from_x(self, x, hi_thr=0.7, eps=1e-6):
+        """
+        x: torch tensor [1, D, H, W] or [D,H,W], already normalized to [0,1]
+        background is exactly 0.
+        returns torch tensor [F]
+        """
+        if x.ndim == 4:  # [1,D,H,W]
+            x = x[0]
+        mask = x > 0
+        v = x[mask]
+
+        # after masking less than 10 voxels, return zero
+        if v.numel() < 10: return torch.zeros(len(self.extra_global_feats), device=x.device)
+
+        feats = []
+        for name in self.extra_global_feats:
+            if name == "p95":
+                feats.append(torch.quantile(v, 0.95))
+            elif name == "std":
+                feats.append(v.std(unbiased=False))
+            elif name == "frac_hi":
+                feats.append((v > hi_thr).float().mean())
+            else:
+                raise ValueError(f"Unknown global feature: {name}")
+
+        return torch.stack(feats)
