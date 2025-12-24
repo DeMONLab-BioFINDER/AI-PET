@@ -62,7 +62,7 @@ def main(args):
     test_folder = os.path.join(args.output_path, 'validation', args.dataset)
     os.makedirs(test_folder, exist_ok=True)
     df_result_te.to_csv(f'{test_folder}/Test_{args.dataset}_results.csv', index=False)
-    pd.DataFrame(metrics_te).to_csv(f'Test_{args.dataset}_metrics.csv', index=False)
+    pd.DataFrame([metrics_te]).to_csv(f'Test_{args.dataset}_metrics.csv', index=False)
     
     print('DONE!')
 

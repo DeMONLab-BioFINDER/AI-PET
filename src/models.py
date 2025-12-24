@@ -76,7 +76,7 @@ class UNet3D(nn.Module):
     def __init__(self, in_channels: int = 1, out_channels: int = 64, num_classes: int = 1, 
                  channels=(16, 32, 64, 128, 256), strides=(2, 2, 2, 2), 
                  num_res_units: int = 2, norm: str = "instance", dropout: float = 0.0, 
-                 up_kernel_size: int = 2, use_basic: bool = False, extra_dim: int = 0):
+                 use_basic: bool = False, extra_dim: int = 0): #up_kernel_size: int = 2, 
     
         super().__init__()
         self.num_classes = num_classes
@@ -89,18 +89,19 @@ class UNet3D(nn.Module):
         else:
             self.net = UNet(spatial_dims=3, in_channels=in_channels, out_channels=out_channels,
                             channels=list(channels), strides=list(strides), num_res_units=num_res_units,
-                            norm=norm, dropout=dropout, up_kernel_size=up_kernel_size)
+                            norm=norm, dropout=dropout) #, up_kernel_size=up_kernel_size
         
         in_fc = out_channels + extra_dim
+
+        self.gap = nn.AdaptiveAvgPool3d(1)
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_fc, num_classes),)
 
-    def forward(self, x):
+    def forward(self, x, extra):
         feat = self.net(x)          # [B, C, D, H, W]
         feat = self.gap(feat).flatten(1)  # [B, C]
 
         if extra is not None and torch.isfinite(extra).any():
-            if extra.ndim == 1:
-                extra = extra.unsqueeze(0)
+            if extra.ndim == 1: extra = extra.unsqueeze(0)
             feat = torch.cat([feat, extra], dim=1)
 
         out = self.head(feat)              # [B, num_classes]

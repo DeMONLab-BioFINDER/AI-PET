@@ -270,7 +270,7 @@ def plot_metrics_from_csv(csv_path: str, out_png: str):
     #    _plot_lines(ax2, x, df, reg, "Regression")
     #else:
     #    _plot_lines(ax1, x, df, cls or reg, "Classification" if cls else "Regression")
-    _plot_lines(ax1, x, df, defs)
+    _plot_lines(ax1, x, df, defs, 'Value')
 
     ax1.set_xlabel("Epoch")
     plt.title("Validation metrics vs training loss per epoch")

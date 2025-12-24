@@ -109,7 +109,7 @@ def train_model(model, dl_tr, dl_va, *, args, fold_name, path_list, optuna_repor
     for epoch in epoch_bar:
         tr_loss_mean, tr_loss_all = train_one_epoch(model=model, loader=dl_tr, opt=optimizer, scaler=scaler,
                                                     device=args.device, loss_w_cls=args.loss_w_cls, loss_w_reg=args.loss_w_reg,
-                                                    reg_loss=args.reg_loss, smoothl1_beta=args.smoothl1_betes)
+                                                    reg_loss=args.reg_loss, smoothl1_beta=args.smoothl1_beta)
 
         # ---- Inference on training (or inner test of validation) ----
         metrics, _ = inference(model, dl_va, args.device)
@@ -149,7 +149,7 @@ def _make_outfolder_fold(output_path, fold_name):
 
     train_eval_csv_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.csv")
     train_loss_csv_path = os.path.join(output_fold_dir, "trainning_loss_allsubjects_per_epoch.csv")
-    train_eval_png_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.csv")
+    train_eval_png_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.png")
     test_eval_pkl_path = os.path.join(output_fold_dir, "train-test_preds-metrics_thisfold.csv")
 
     path_list = {'train_eval_csv': train_eval_csv_path, 'train_loss_csv': train_loss_csv_path, 
