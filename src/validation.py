@@ -86,12 +86,14 @@ def finetune(model, dl_tr, dl_va, it, args, fold_name="few-shots"):
     
     finetune_path = os.path.join(args.output_path, f"fewshot-{args.few_shot}") ### ! Same as in run_few_shots()
     save_path = f"{finetune_path}/iter-{args.few_shot_iterations}-{it}"
-    path_list = [f"{save_path}_training_metrics_per_epoch.csv", f"{save_path}_trainning_loss_allfinetunesubjects_per_epoch.csv", f"{save_path}_finetuned_best.pt"]
+    path_list = {"train_eval_csv": f"{save_path}_training_metrics_per_epoch.csv",
+                 "train_loss_csv": f"{save_path}_trainning_loss_allfinetunesubjects_per_epoch.csv",
+                 "ckpt": f"{save_path}_finetuned_best.pt"}
 
     model, _ = train_model(model, dl_tr, dl_va, args=args, fold_name=fold_name, path_list=path_list)
 
-    if os.path.exists(path_list[2]):
-        model = load_best_checkpoint(model, ckpt_path=path_list[2], device=args.device)
+    if os.path.exists(path_list['ckpt']):
+        model = load_best_checkpoint(model, ckpt_path=path_list['ckpt'], device=args.device)
     else:
         print("! No finetune checkpoint found, using last-epoch weights")
 

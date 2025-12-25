@@ -78,7 +78,7 @@ def run_fold(train_df, val_df, args, fold_name: str, *, optuna_report=None):
     if not train_only: model = load_best_checkpoint(model, ckpt_path=path_list['ckpt'], device=args.device) # In final retrain, there is no val-based checkpoint; use LAST-EPOCH weights
     
     # inference and save resutls
-    metrics_tr, df_result_tr = inference(model, dl_va, args.device)
+    metrics_tr, df_result_tr = inference(model, dl_eval, args.device)
     metrics_te, df_result_te = inference(model, dl_va, args.device)
     metrics_te["best_epoch"] = int(best_epoch)
     pickle.dump({'train':{'metric': metrics_tr, 'preds': df_result_tr},

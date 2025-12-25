@@ -33,7 +33,7 @@ def main(args):
         print("\n========== FEW-SHOT FINETUNING COMPLETE ==========\n")
     else:
         print("\n========== INFERENCE DIRECTLY ==========\n")
-        metrics, df_results = inference(model, dl, targets_list, args.device)
+        metrics, df_results = inference(model, dl, args.device)
         print("metrics:", metrics)
         df_metrics = pd.DataFrame([metrics])
         out_csv_prefix = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}_zeroshot')

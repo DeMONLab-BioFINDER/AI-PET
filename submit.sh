@@ -11,7 +11,7 @@ module load Miniforge3/24.7.1-2-hpc1-bdist
 mamba activate ai-pet
 
 # Execute your code
-python run.py --no-tune --model_name_extra smoothl1-10_global-input-frac_hi --targets CL --extra_global_feats frac_hi
+python run.py --no-tune --model_name_extra smoothl1-10 --targets CL --model UNet3D
 
 #--model_name_extra brainmask --stratifycvby visual_read,gender --model UNet3D
 
