@@ -4,14 +4,14 @@
 #SBATCH -A berzelius-2025-231
 #SBATCH --gpus=1
 #SBATCH -t 12:00:00
-#SBATCH -J CL-Gf
+#SBATCH -J VR-UNet
 
 # Load your environment
 module load Miniforge3/24.7.1-2-hpc1-bdist
 mamba activate ai-pet
 
 # Execute your code
-python run.py --no-tune --model_name_extra smoothl1-10 --targets CL --model UNet3D
+python run.py --no-tune --model_name_extra Balanced_sampling_L1-10 --model UNet3D
 
 #--model_name_extra brainmask --stratifycvby visual_read,gender --model UNet3D
 

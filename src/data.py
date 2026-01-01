@@ -7,7 +7,7 @@ import pandas as pd
 import scipy.ndimage as ndi
 from pathlib import Path
 from typing import List, Optional, Union
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from monai.data import MetaTensor
 from monai.transforms import (LoadImage, EnsureChannelFirst, Orientation, Resize,
         ScaleIntensityRangePercentiles, Compose, CropForeground, GaussianSmooth,
@@ -209,8 +209,18 @@ def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
     g.manual_seed(args.seed)
 
     dataset = PETDataset(df, tfm, args.targets, input_cl=args.input_cl, extra_global_feats=args.extra_global_feats, augment=augment)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                        worker_init_fn=seed_worker, generator=g,
+
+    if "dataset" in df.columns: #### domain-balanced sampling
+        # inverse-frequency weights
+        counts = df["dataset"].value_counts().to_dict()
+        weights = df["dataset"].map(lambda d: 1.0 / counts[d]).values
+        sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+        shuffle = False
+    else:
+        sampler = None
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
+                        worker_init_fn=seed_worker, generator=g, 
                         num_workers=args.num_workers, pin_memory=False)
 
     return loader

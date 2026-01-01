@@ -28,7 +28,7 @@ def main(args):
         df_metrics, df_results, df_ids = run_few_shots(args, df, tfm, model, targets_list)
         print("metrics:")
         print(df_metrics.describe())
-        out_csv_prefix = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}_fewshot-{args.few_shot}_iter-{args.few_shot_iterations}')
+        out_csv_prefix = os.path.join(args.output_path, f'External_validation_{args.dataset}_{args.data_suffix}_{args.targets}_unfreeze-{args.unfreeze_layers}_fewshot-{args.few_shot}_iter-{args.few_shot_iterations}')
         df_ids.to_csv(f"{out_csv_prefix}_subject_ids.csv", index=False)
         print("\n========== FEW-SHOT FINETUNING COMPLETE ==========\n")
     else:

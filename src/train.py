@@ -13,24 +13,29 @@ def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls, loss_w_reg, 
     model.train()
     losses = []
 
-    for x, y_cls, y_reg, extra, _ in tqdm(loader, desc="Train", leave=False):
+    for x, y_cls, y_reg, extra, idx in tqdm(loader, desc="Train", leave=False):
         x = x.to(device)
         extra = extra.to(device)
+        idx = idx.to(x.device)
         y_cls = y_cls.to(device) if y_cls is not None else None
         y_reg = y_reg.to(device) if y_reg is not None else None
 
+        #domain_weights = torch.where(idx > 20000, torch.tensor(10.0, device=idx.device),
+        #                 torch.tensor(1.0, device=idx.device))  # shape [B] !!!!!!! HARD code for ADNI & IDEAS
+        domain_weights = torch.ones_like(idx, dtype=torch.float32, device=idx.device)
+        
         opt.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with torch.cuda.amp.autocast():
                 loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
-                    loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta)
+                    loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta, domain_weights=domain_weights)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
         else:
             loss, _ = compute_total_loss(model, x, y_cls, y_reg, extra=extra,
-                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta)
+                loss_w_cls=loss_w_cls, loss_w_reg=loss_w_reg, reg_loss=reg_loss, smoothl1_beta=smoothl1_beta, domain_weights=domain_weights)
             loss.backward()
             opt.step()
 
@@ -156,17 +161,18 @@ def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):
 
 
 def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: torch.Tensor,
-                       y_reg: torch.Tensor, extra: torch.Tensor, loss_w_cls: float, loss_w_reg: float,
-                       reg_loss: str, smoothl1_beta: float): # "mse" or "smoothl1" # CL units
+                       y_reg: torch.Tensor, extra: torch.Tensor,
+                       loss_w_cls: float, loss_w_reg: float,
+                       reg_loss: str, smoothl1_beta: float, domain_weights: torch.Tensor): # "mse" or "smoothl1" # CL units
     """
     Forward + weighted loss.
     Returns: (loss, (logit, cent))
     """
     # ---- regression loss selector ----
     if reg_loss == "mse":
-        reg_criterion = nn.MSELoss()
+        reg_criterion = nn.MSELoss(reduction="none")
     elif reg_loss == "smoothl1":
-        reg_criterion = nn.SmoothL1Loss(beta=smoothl1_beta)
+        reg_criterion = nn.SmoothL1Loss(beta=smoothl1_beta, reduction="none")
     else:
         raise ValueError(f"Unknown reg_loss: {reg_loss}")
 
@@ -179,17 +185,17 @@ def compute_total_loss(model: torch.nn.Module, x: torch.Tensor, y_cls: torch.Ten
     if (not y_cls.isnan().all()) and (loss_w_cls > 0) and (logit is not None):
         if logit.ndim == 2 and logit.shape[1] == 1:
             assert set(torch.unique(y_cls).tolist()) <= {0.0, 1.0}, "BCE requires binary {0,1} targets" # BCE path: targets must be float 0/1
-            loss_cls = nn.BCEWithLogitsLoss()(logit.squeeze(1), y_cls.squeeze(1).float())
+            loss_cls = nn.BCEWithLogitsLoss()(logit.squeeze(1), y_cls.squeeze(1).float(), reduction="none")
         else:
             yl = y_cls.squeeze(1).long()
             assert yl.min() >= 0 and yl.max() < logit.shape[1], "CE: target out of range" # CE path: targets must be long in [0..C-1]
-            loss_cls = F.cross_entropy(logit, yl)
-        total = total + loss_w_cls * loss_cls
+            loss_cls = F.cross_entropy(logit, yl, reduction="none")
+        total = total + loss_w_cls * (domain_weights * loss_cls).mean()
         used_head = True
     # ---- regression loss ----
     if (not y_reg.isnan().all()) and (loss_w_reg > 0) and (cent is not None):
-        loss_reg = reg_criterion(cent, y_reg)
-        total += loss_w_reg * loss_reg
+        loss_reg = reg_criterion(cent, y_reg).squeeze(1)
+        total += loss_w_reg * (domain_weights * loss_reg).mean()
         used_head = True
 
     if not used_head: raise ValueError("No usable heads/targets: check model outputs and loss weights.")

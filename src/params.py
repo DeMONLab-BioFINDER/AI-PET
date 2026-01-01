@@ -17,7 +17,7 @@ def parse_arguments():
     parser.add_argument("--device", type=str, default=get_device(), help='e.g., "cpu", "cuda", "cuda:0"')
 
     # Input paths and data
-    parser.add_argument("--dataset", type=str, default="IDEAS", help="Dataset name, ADNI, IDEAS, or ADNI_CL (suffix to load demographics .csv)")
+    parser.add_argument("--dataset", type=str, default="IDEAS_ADNI", help="Dataset name, ADNI, IDEAS, or ADNI_CL (suffix to load demographics .csv)")
     parser.add_argument("--input_path", type=str, default='', help='images save in BIDS format. If not input, will set as <proj_path>/data') # Berkeley server ADNI data path: /home/jagust/xnat/squid/adni/
     parser.add_argument("--data_suffix", type=str, default='', help='images finding pattern **/*<suffix>/*/*/*.nii* for find_pet_images function, specifically to IDEAS data. e.g._Inten_Norm or SCANS (folder name of Berkeley server ADNI data)')
     parser.add_argument("--targets", type=str, default="visual_read", help="Predict variables name, corresponds to column names in demographics.csv, seperate by ,")
@@ -46,7 +46,7 @@ def parse_arguments():
 
     # CV
     parser.add_argument("--n_splits", type=int, default=5, help="Number of folds for StratifiedKFold.")
-    parser.add_argument("--stratifycvby", default="visual_read,site", help=",site,tracer, List of column names to stratify by (e.g., visual_read CL age gender).")
+    parser.add_argument("--stratifycvby", default="visual_read,dataset", help=",site,tracer, List of column names to stratify by (e.g., visual_read CL age gender).")
     
     # Hypertune - Optuna
     parser.add_argument("--tune", action=argparse.BooleanOptionalAction, default=True)
@@ -121,7 +121,7 @@ def make_output_dir(args, proj_path, script_path):
         # Construct output path'
         tune = f'hypertune-optuna-{args.n_trials}trials' if args.tune else '2split80-20'
         extra_cl = f'extra-lastlayer-input-{args.input_cl}' if args.input_cl else ''
-        args.output_name = "_".join(s for s in [args.model, args.targets, tune, f"stratify-{args.stratifycvby}", args.model_name_extra, extra_cl, args.output_date_time] if s)
+        args.output_name = "_".join(s for s in [args.dataset, args.model, args.targets, tune, f"stratify-{args.stratifycvby}", args.model_name_extra, extra_cl, args.output_date_time] if s)
         # "_".join([args.model, args.targets, tune, f'stratify-{args.stratifycvby}', args.model_name_extra, extra_cl, args.output_date_time])
         args.output_path = os.path.join(proj_path, "results", args.output_name)
 

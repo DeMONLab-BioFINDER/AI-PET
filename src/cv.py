@@ -150,7 +150,7 @@ def _make_outfolder_fold(output_path, fold_name):
     train_eval_csv_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.csv")
     train_loss_csv_path = os.path.join(output_fold_dir, "trainning_loss_allsubjects_per_epoch.csv")
     train_eval_png_path = os.path.join(output_fold_dir, "trainning_metrics_per_epoch.png")
-    test_eval_pkl_path = os.path.join(output_fold_dir, "train-test_preds-metrics_thisfold.csv")
+    test_eval_pkl_path = os.path.join(output_fold_dir, "train-test_preds-metrics_thisfold.pkl")
 
     path_list = {'train_eval_csv': train_eval_csv_path, 'train_loss_csv': train_loss_csv_path, 
                  'train_eval_png': train_eval_png_path, 'train-test_eval_pkl': test_eval_pkl_path,
