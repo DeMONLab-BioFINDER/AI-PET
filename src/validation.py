@@ -14,7 +14,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from src.data import build_master_table, get_transforms, get_loader
 from src.train import inference
 from src.cv import train_model
-from src.utils import compute_smooth_sigma_vox, build_model_from_args, load_best_checkpoint
+from src.utils import compute_smooth_sigma_vox, build_model_from_args, load_best_checkpoint, add_quantile_bins
 
 import torch.multiprocessing as mp
 os.environ["NIBABEL_KEEP_FILE_OPEN"] = "0"
@@ -33,14 +33,17 @@ def run_few_shots(args, df, tfm, base_model, targets_list):
         seed_it = args.seed + it
 
         # ----- stratification -----
+        # Only works for visual_read and CL
         if "visual_read" in targets_list:
             strat_col = "visual_read"
-            df_use = df
+            df_use = df.dropna(subset=["visual_read"])
         else:
             df_use = add_quantile_bins(df, "CL")
-            strat_col = "_qbin"
+            strat_col = "CL_qbin"
+            df = df.dropna(subset=['CL'])
 
         # ----- split -----
+        print('few shot stratified by', strat_col, 'for', df_use.shape, 'scans')
         df_fs, df_eval = stratified_few_shot_split(df_use, n_shot=args.few_shot, stratify_col=strat_col, seed=seed_it)
         all_fs_ids.append({"iteration": it, "ids": df_fs["ID"].tolist()})
         df_ids = pd.DataFrame(all_fs_ids)
@@ -132,8 +135,20 @@ def load_validation_data(args):
         print(test_set)
         df = pd.read_csv(test_set, index_col=0)
         tfm = args.input_path
+    elif 'A4' in args.dataset: # Berzelius, load torch tensors
+        print('Validate on A4 dataset...')
+        test_set = os.path.join(args.proj_path, "data", f'demo_{args.dataset}.csv')
+        print(test_set)
+        df = pd.read_csv(test_set, index_col=0)
+        tfm = args.input_path
     
-    dl_va = get_loader(df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
+    # remove nan
+    print(df)
+    targets = [t.strip() for t in args.targets.split(",") if t.strip()]
+    df = df.dropna(subset=targets)
+    print(f'Validation set size: {len(df)} images')
+
+    dl_va = get_loader(df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False, train_test='test')
 
     return tfm, dl_va, df
 
@@ -217,12 +232,6 @@ def stratified_few_shot_split(df: pd.DataFrame, n_shot: int, stratify_col: str, 
     df_eval = df.iloc[eval_idx].reset_index(drop=True)
 
     return df_fs, df_eval
-
-
-def add_quantile_bins(df, col, n_bins=5):
-    df = df.copy()
-    df["_qbin"] = pd.qcut(df[col], q=n_bins, duplicates="drop")
-    return df
 
 
 def bootstrap_ci(values, n_boot=2000, ci=95, seed=0):

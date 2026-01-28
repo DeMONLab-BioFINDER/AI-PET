@@ -31,17 +31,19 @@ def run_visualization(model, loader, device, output_path, vis_name="gradcam",
     All visualizations are performed in the model input (preprocessed PET)
     space without registration to standard templates.
     """
+    vis_type = ['class','pos_vs_neg']
     VIS_REGISTRY = {
         "gradcam": gradcam_vis_fn,
         "occlusion": occlusion_vis_fn,
         }
     vis_fn = VIS_REGISTRY[vis_name]
+    print('vis_fn:',vis_fn)
     vis_kwargs = vis_kwargs or {}
 
     vis_dir = os.path.join(output_path, 'visualization', vis_name)
     os.makedirs(vis_dir, exist_ok=True)
 
-    vis_sum = None
+    vis_sum = {'class': None,'pos_vs_neg':None}
     n = 0
     for x, _, _, extra, pid in loader:
         x = x.to(device)
@@ -53,42 +55,47 @@ def run_visualization(model, loader, device, output_path, vis_name="gradcam",
             pid_b = pid[b]
 
             # visualize
-            heat = vis_fn(model=model, x=xb, extra=extrab, **vis_kwargs)  # [D,H,W]
-            assert heat.ndim == 3
-            img_np = xb[0, 0].detach().cpu().numpy()  # (D,H,W)
+            heat_class, heat_pos_vs_neg = vis_fn(model=model, x=xb, extra=extrab, **vis_kwargs)  # [D,H,W]
 
-            # PET-based brain & skull suppression
-            brain_mask = img_np > np.percentile(img_np[img_np > 0], skull_suppress_pct)
-            heat = heat * brain_mask
+            for heat, vt in zip([heat_class, heat_pos_vs_neg], vis_type):
+                if heat is None: continue # skip when heat_pos_vs_neg is None
+                assert heat.ndim == 3
+                img_np = xb[0, 0].detach().cpu().numpy()  # (D,H,W)
 
-            if vis_norm is not None: heat = normalize_cam(heat, vis_norm)
+                # PET-based brain & skull suppression
+                brain_mask = img_np > np.percentile(img_np[img_np > 0], skull_suppress_pct)
+                heat = heat * brain_mask
 
-            # save to NIFTI
-            affine = affine_fn(pid_b) if affine_fn else np.eye(4)
-            nib.save(nib.Nifti1Image(heat.astype(np.float32), affine),
-                     os.path.join(vis_dir, f"{pid_b}_{vis_name}.nii.gz"))
+                if vis_norm is not None: heat = normalize_cam(heat, vis_norm)
 
-            # MIP visualization
-            save_mip_png(img_np, heat, os.path.join(vis_dir, f"{pid_b}_{vis_name}_mip.png"))
-            
-            # Pseudo-surface visualization (no T1w available, no affine)
-            if use_pseudo_surface:
-                shell = pet_pseudo_surface(img_np, sigma=pseudo_surface_sigma, pct=pseudo_surface_pct)
-                shell_cam = heat * shell
-                save_mip_png(img_np, shell_cam, os.path.join(vis_dir, f"{pid_b}_{vis_name}_pseudo_surface.png"))
+                # save to NIFTI
+                affine = affine_fn(pid_b) if affine_fn else np.eye(4)
+                nib.save(nib.Nifti1Image(heat.astype(np.float32), affine),
+                        os.path.join(vis_dir, f"{pid_b}_{vis_name}_{vt}.nii.gz"))
 
-            vis_sum = heat if vis_sum is None else vis_sum + heat
+                # MIP visualization
+                save_mip_png(img_np, heat, os.path.join(vis_dir, f"{pid_b}_{vis_name}_{vt}_mip.png"))
+                
+                # Pseudo-surface visualization (no T1w available, no affine)
+                if use_pseudo_surface:
+                    shell = pet_pseudo_surface(img_np, sigma=pseudo_surface_sigma, pct=pseudo_surface_pct)
+                    shell_cam = heat * shell
+                    save_mip_png(img_np, shell_cam, os.path.join(vis_dir, f"{pid_b}_{vis_name}_{vt}_pseudo_surface.png"))
+
+                vis_sum[vt] = heat if vis_sum[vt] is None else vis_sum[vt] + heat
             n += 1
+    
+    print('saving average image to', vis_dir)
+    for vt in vis_type:
+        # group-level average
+        vis_avg = vis_sum[vt] / n
+        nib.save(nib.Nifti1Image(vis_avg.astype(np.float32), np.eye(4)),
+                os.path.join(vis_dir, f"group_average_{vis_name}.nii.gz"))
+        save_mip_png(img_np, vis_avg, os.path.join(vis_dir, f"group_average_{vis_name}_{vt}_mip.png"))
 
-    # group-level average
-    vis_avg = vis_sum / n
-    nib.save(nib.Nifti1Image(vis_avg.astype(np.float32), np.eye(4)),
-             os.path.join(vis_dir, f"group_average_{vis_name}.nii.gz"))
-    save_mip_png(img_np, vis_avg, os.path.join(vis_dir, f"group_average_{vis_name}_mip.png"))
-
-    if use_pseudo_surface:
-        shell = pet_pseudo_surface(img_np, pseudo_surface_sigma, pseudo_surface_pct)
-        save_mip_png(img_np, vis_avg * shell, os.path.join(vis_dir, f"group_average_{vis_name}_pseudo_surface.png"))
+        if use_pseudo_surface:
+            shell = pet_pseudo_surface(img_np, pseudo_surface_sigma, pseudo_surface_pct)
+            save_mip_png(img_np, vis_avg * shell, os.path.join(vis_dir, f"group_average_{vis_name}_{vt}_pseudo_surface.png"))
 
 
 def gradcam_vis_fn(model, x, extra, target_layer=None, normalize=True, upsample_mode="trilinear"):
@@ -116,7 +123,7 @@ def gradcam_vis_fn(model, x, extra, target_layer=None, normalize=True, upsample_
         vmin, vmax = cam_np.min(), cam_np.max()
         cam_np = (cam_np - vmin) / (vmax - vmin) if vmax > vmin else np.zeros_like(cam_np)
 
-    return cam_np
+    return cam_np, None
 
 
 @torch.no_grad()
@@ -126,12 +133,17 @@ def occlusion_vis_fn(model, x, extra, **kwargs):
     def fwd(x_):
         return model(x_, extra=extra)
 
-    occ = OcclusionSensitivity(nn_module=model, mask_size=kwargs.get("mask_size", (16,16,16)),
-                               n_batch=kwargs.get("n_batch", 16), overlap=kwargs.get("overlap", 0.6),
+    occ = OcclusionSensitivity(nn_module=model, mask_size=kwargs.get("mask_size", (8,8,8)), #lambda x_: model(x_, extra=extra)
+                               n_batch=kwargs.get("n_batch", 16), overlap=kwargs.get("overlap", 0.75),
                                activate=kwargs.get("activate", True),)
-    occ_map, _ = occ(x, extra=extra)  # [1,1,D,H,W,1] # calls fwd(x)
+    occ_map, _ = occ(x, extra=extra)  # [1,1,D,H,W,1] # calls fwd(x) 
     heat = (-occ_map).float().squeeze().cpu().numpy()
-    return heat
+
+    pred_class = model(x, extra=extra).argmax(dim=1).item()
+    heat_class = heat[pred_class] # Why did the model predict this class?
+    heat_pos_vs_neg = heat[1] - heat[0]
+
+    return heat_class, heat_pos_vs_neg
 
 
 def normalize_cam(cam, mode="zscore", eps=1e-6):

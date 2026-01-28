@@ -53,10 +53,10 @@ def build_master_table(input_path: str, preproce_method: str, targets: List[str]
         df = pd.merge(pets, labels, on=keys, how="inner", suffixes=("", "_selected"))
         df = df.sort_values(keys + [c for c in ["pet_path"] if c in df.columns]).reset_index(drop=True)
 
-        # Only scans with targets value
-        targets_list = [t.strip() for t in targets.split(",") if t.strip()]
-        df = df[~df[targets_list].isna().values].reset_index(drop=True)
-        print(f'Found {df.shape[0]} scans with demographics for {targets}')
+    # Only scans with targets value
+    targets_list = [t.strip() for t in targets.split(",") if t.strip()]
+    df = df[~df[targets_list].isna().values].reset_index(drop=True)
+    print(f'Found {df.shape[0]} scans with demographics for {targets}')
 
     return df
 
@@ -171,7 +171,7 @@ def load_participants_labels(input_path: str, dataset: Optional[str] = None) -> 
             raise FileNotFoundError(f"Missing {csv}. Provide columns: ID, site, visual_read, CL, age, gender, ...")
     df = pd.read_csv(csv, index_col=0)
     
-    print('loaded participants:', df.shape, df.columns, df.head(3))
+    print(f'loaded participants from {csv}:', df.shape, df.columns, df.head(3))
     # Ensure required columns are present in the dataframe.
     required = {"ID", "site", "visual_read", "CL", "age", "gender"}
     missing = required - set(df.columns)
@@ -198,19 +198,20 @@ def get_train_val_loaders(train_df, val_df, args):
         tfm = get_transforms(tuple(args.image_shape))
 
 
-    dl_tr = get_loader(train_df, tfm, args, batch_size=args.batch_size, augment=True, shuffle=True)
-    dl_va = get_loader(val_df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False)
+    dl_tr = get_loader(train_df, tfm, args, batch_size=args.batch_size, augment=True, shuffle=True, train_test='train')
+    dl_va = get_loader(val_df, tfm, args, batch_size=max(1, args.batch_size // 2), augment=False, shuffle=False, train_test='test')
     
     return dl_tr, dl_va
 
 
-def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False):
+def get_loader(df, tfm, args, batch_size, augment=False, shuffle=False, train_test='train'):
     g = torch.Generator()
     g.manual_seed(args.seed)
 
     dataset = PETDataset(df, tfm, args.targets, input_cl=args.input_cl, extra_global_feats=args.extra_global_feats, augment=augment)
 
-    if "dataset" in df.columns: #### domain-balanced sampling
+    if "dataset" in df.columns and train_test=='train': #### domain-balanced sampling
+        print('------ Balanced sampling ------')
         # inverse-frequency weights
         counts = df["dataset"].value_counts().to_dict()
         weights = df["dataset"].map(lambda d: 1.0 / counts[d]).values
@@ -366,7 +367,7 @@ class PETDataset(Dataset):
         
         extra_input = torch.cat(extras) if extras else torch.tensor([float("nan")])
 
-        return x, y_cls, y_reg, extra_input, row["ID"]
+        return x, y_cls, y_reg, extra_input, int(row["ID"])
     
     def global_feats_from_x(self, x, hi_thr=0.7, eps=1e-6):
         """

@@ -47,17 +47,19 @@ def train_one_epoch(model, loader, opt, scaler, device, loss_w_cls, loss_w_reg, 
 
 @torch.no_grad()
 def inference(model, loader, device):
-    probs, ycls, preds, any_cls, cents, yreg, any_reg = evals(model, loader, device)
+    probs, ycls, preds, any_cls, cents, yreg, any_reg, ids = evals(model, loader, device)
 
     metrics = compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg)
     # es_metric <- val_metric
-
+    print('ids shape:', ids)
     if any_cls: 
-        df_result = pd.DataFrame({'y': np.concatenate(ycls, axis=0), 
+        df_result = pd.DataFrame({'ID_ind': np.concatenate(ids, axis=0), 
+                                  'y': np.concatenate(ycls, axis=0), 
                                   'pred':np.concatenate(preds, axis=0),
                                   'prob':np.concatenate(probs, axis=0)})
     if any_reg:
-        df_result = pd.DataFrame({'y': np.concatenate(yreg, axis=0),
+        df_result = pd.DataFrame({'ID_ind': np.concatenate(ids, axis=0), 
+                                  'y': np.concatenate(yreg, axis=0),
                                   'pred':np.concatenate(cents, axis=0)})
 
     return metrics, df_result
@@ -69,8 +71,9 @@ def evals(model, loader, device):
 
     probs, ycls, preds = [], [], []
     cents, yreg = [], []
+    ids = []
     any_cls, any_reg = False, False
-    for x, y_cls, y_reg, extra, _ in tqdm(loader, desc="Val", leave=False):
+    for x, y_cls, y_reg, extra, id in tqdm(loader, desc="Val", leave=False):
         x = x.to(device)
         extra = extra.to(device)
         out = model(x, extra=extra)
@@ -104,7 +107,9 @@ def evals(model, loader, device):
             cents.append(cent.cpu().numpy().ravel())
             yreg.append(y_reg.cpu().numpy().ravel())
 
-    return probs, ycls, preds, any_cls, cents, yreg, any_reg
+        ids.append(id.to(device).cpu().numpy().ravel())
+
+    return probs, ycls, preds, any_cls, cents, yreg, any_reg, ids
 
 
 def compute_metrics(ycls, preds, probs, any_cls, yreg, cents, any_reg):

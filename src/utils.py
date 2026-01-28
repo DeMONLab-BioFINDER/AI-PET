@@ -80,6 +80,26 @@ def load_best_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.d
         model.load_state_dict(state_dict, strict=False)
     return model
 
+
+def add_quantile_bins(df, col, n_bins=5):
+    df = df.copy()
+    df[f"{col}_qbin"] = pd.qcut(df[col], q=n_bins, duplicates="drop")
+    return df
+
+
+def is_continuous_numeric(s, min_unique_ratio=0.05):
+    """
+    Heuristic check for continuous numeric variable.
+    """
+    if not pd.api.types.is_numeric_dtype(s): return False
+
+    s = s.dropna()
+    if len(s) == 0: return False
+
+    unique_ratio = s.nunique() / len(s)
+    return unique_ratio >= min_unique_ratio
+
+
 def compute_smooth_sigma_vox(voxel_sizes_mm: tuple[float, float, float], fwhm_current_mm: float, fwhm_target_mm: float) -> tuple[float, float, float] | None:
     """
     Returns per-axis sigma in *voxels* for MONAI.GaussianSmooth to top-up smoothing
@@ -158,19 +178,42 @@ def make_splits(df, labels, n_splits, seed):
     return list(skf.split(df, labels))
 
 
-def hold_out_set(df, labels, test_size: float = 0.2, seed: int = 42,) -> Tuple[np.ndarray, np.ndarray]:
+def hold_out_set(df, labels, subject_col, test_size: float = 0.2, seed: int = 42,) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Make a single held-out lockbox using StratifiedKFold via make_splits().
-    K is chosen as round(1/test_size). Returns (train_idx, test_idx).
+    Subject-level hold-out split with stratification.
 
-    Note: exact size will be ~1/K of data (not arbitrary percentages).
+    - Splits by subject (no leakage)
+    - Stratifies using subject-level labels
+    - Returns scan-level indices
     """
-    # ensure sane K
-    #k = max(2, int(round(1.0 / float(test_size))))
-    k = 5
-    splits = make_splits(df, labels, n_splits=k, seed=seed)
-    train_idx, test_idx = splits[-1]   # pick the last fold as test to reduce accidental bias
-    return np.asarray(train_idx), np.asarray(test_idx)
+    df = df.copy()
+
+    # ---- 1. build subject-level dataframe ----
+    subj_df = df.drop_duplicates(subset=subject_col, keep='first') if subject_col is not None else df.copy()
+    assert len(subj_df) == subj_df[subject_col].nunique()
+    subj_labels = labels.loc[subj_df.index]
+    assert (subj_df.index == subj_labels.index).all()
+
+    # ---- 2. determine K from test_size ----
+    k = max(2, int(round(1.0 / float(test_size))))
+
+    # ---- 3. subject-level stratified splits ----
+    splits = make_splits(subj_df, subj_labels, n_splits=k, seed=seed)
+
+    # pick last fold as hold-out (your original logic)
+    train_s, test_s = splits[-1]
+
+    train_ids = subj_df.iloc[train_s][subject_col]
+    test_ids  = subj_df.iloc[test_s][subject_col]
+
+    # ---- 4. map back to scan-level indices ----
+    train_idx = df[df[subject_col].isin(train_ids)].index.to_numpy()
+    test_idx  = df[df[subject_col].isin(test_ids)].index.to_numpy()
+
+    print("hold out training vs testing:", len(train_idx), len(test_idx),
+          f"(subjects: {len(train_ids)} / {len(test_ids)})")
+
+    return train_idx, test_idx
 
 
 def _resolve_model_class(name: str):
@@ -285,3 +328,33 @@ def _plot_lines(ax, x, df, metrics, ylabel):
     ax.set_ylabel(ylabel)
     if metrics:
         ax.legend(loc="best")
+
+def random_assign_nan_labels(df: pd.DataFrame, labels, seed: int):
+    """
+    Randomly assigns NaN rows to existing label combinations
+    (used ONLY for stratification).
+    Modifies df in place.
+    """
+    y = df[labels]
+    nan_mask = y.isna().any(axis=1) # row-wise
+
+    if not nan_mask.any():
+        return df
+
+    rng = np.random.default_rng(seed)
+
+    vc = (y[~nan_mask].astype(str) # avoid mixed dtype issues
+          .agg("|".join, axis=1).value_counts())
+
+    classes = vc.index.to_numpy()
+    probs = (vc / vc.sum()).to_numpy()
+
+    assigned = rng.choice(classes, nan_mask.sum(), p=probs)
+    assigned_df = (pd.Series(assigned).str.split("|", expand=True).set_axis(labels, axis=1))
+
+    df.loc[nan_mask, labels] = assigned_df.values
+
+    print(f"Stratified CV split, Assigned {nan_mask.sum()} NaN rows:",
+          assigned_df.value_counts())
+    
+    return df

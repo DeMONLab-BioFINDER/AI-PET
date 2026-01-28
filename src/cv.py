@@ -11,7 +11,9 @@ from src.data import get_train_val_loaders
 from src.early_stopping import EarlyStopper
 from src.train import train_one_epoch, inference
 from src.vis import run_visualization
-from src.utils import append_metrics_csv, save_checkpoint, build_model_from_args, load_best_checkpoint, plot_metrics_from_csv, save_train_test_subjects
+from src.utils import (append_metrics_csv, save_checkpoint, build_model_from_args,
+                       load_best_checkpoint, plot_metrics_from_csv, save_train_test_subjects,
+                       random_assign_nan_labels, add_quantile_bins, is_continuous_numeric)
 
 
 def kfold_cv(df_clean, stratify_labels, args):
@@ -159,7 +161,7 @@ def _make_outfolder_fold(output_path, fold_name):
     return output_fold_dir, path_list
 
 
-def get_stratify_labels(df: pd.DataFrame, cols):
+def get_stratify_labels(df: pd.DataFrame, cols, seed):
     """
     Use the exact columns in `cols` for stratification.
     - Drops rows with NaNs in ANY of these columns.
@@ -169,11 +171,20 @@ def get_stratify_labels(df: pd.DataFrame, cols):
     for c in labels:
         if c not in df.columns:
             raise ValueError(f"Column '{c}' not found in dataframe for stratification.")
+        
+    #df_clean = df.dropna(subset=labels).copy()
+    # Assign Nan labels ramdomly to the train and test
+    for l in labels:
+        if is_continuous_numeric(df[l]):
+            df = add_quantile_bins(df, l)
+            df[f"{l}_qbin"] = df[f"{l}_qbin"].cat.codes
+            labels[labels.index(l)] = f"{l}_qbin"
+    df = random_assign_nan_labels(df, labels, seed)
+    print('stratified labels:', labels)
 
-    df_clean = df.dropna(subset=labels).copy()
     # make a single label by concatenating the values as strings
-    stratify_labels = df_clean[labels].astype(str).agg("|".join, axis=1)
-    return df_clean, stratify_labels
+    stratify_labels = df[labels].astype(str).agg("|".join, axis=1)
+    return df, stratify_labels
 
 
 def cv_median_best_epoch(df_train, stratify_labels_train, args) -> int:

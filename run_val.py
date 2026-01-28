@@ -50,7 +50,7 @@ def main(args):
 if __name__ == "__main__":
     args = parse_arguments()
     #args.device = get_device()
-    args.device = get_device(force_cpu=True)
+    args.device = get_device() #force_cpu=True
     print(args)
     set_seed(args.seed)
 

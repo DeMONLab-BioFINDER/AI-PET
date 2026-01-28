@@ -14,14 +14,15 @@ from src.hypertune import create_study_from_args, run_optuna, objective, print_b
 def main(args):
     # 1) data
     df = build_master_table(args.input_path, args.data_suffix, args.targets, args.dataset)
-    df_clean, stratify_labels = get_stratify_labels(df, args.stratifycvby)
+    df_clean, stratify_labels = get_stratify_labels(df, args.stratifycvby, args.seed)
 
     # held-out set (never touch during hyperparameter tunning
-    tr_idx, te_idx = hold_out_set(df_clean, stratify_labels, test_size=0.2, seed=args.seed)
+    tr_idx, te_idx = hold_out_set(df_clean, stratify_labels, subject_col=args.samesubject_col, test_size=0.2, seed=args.seed)
     df_train = df_clean.iloc[tr_idx].reset_index(drop=True)
     df_test = df_clean.iloc[te_idx].reset_index(drop=True)
     save_train_test_subjects(df_train, df_test, args.output_path, 'Hold-out')
-    _, stratify_labels_train = get_stratify_labels(df_train, args.stratifycvby)
+    if 'dataset' in df_train.columns: print('train:', df_train['dataset'].value_counts(), '\ntest:', df_test['dataset'].value_counts())
+    _, stratify_labels_train = get_stratify_labels(df_train, args.stratifycvby, args.seed)
     
     # 2) tuning or direct CV
     if args.tune: # default is tuninig    
@@ -62,7 +63,7 @@ def main(args):
     test_folder = os.path.join(args.output_path, 'validation', args.dataset)
     os.makedirs(test_folder, exist_ok=True)
     df_result_te.to_csv(f'{test_folder}/Test_{args.dataset}_results.csv', index=False)
-    pd.DataFrame([metrics_te]).to_csv(f'Test_{args.dataset}_metrics.csv', index=False)
+    pd.DataFrame([metrics_te]).to_csv(f'{test_folder}Test_{args.dataset}_metrics.csv', index=False)
     
     print('DONE!')
 
